@@ -208,6 +208,84 @@ specific deck (negative Synergy), or vice versa.
         `CombatDamageHud`). Both panels are now fully tuned — `HudTuning.cs`
         and `HudTuningPanel.cs` (the dev-only slider tool) were deleted.
 
+### Turns & Cards tab (2026-08-29)
+
+Extended `PlayerCombatRecord` with `TurnsTaken`/`CardsPlayed` (same file,
+`player_combat_stats.jsonl` — not a separate log), tracked live via two new
+`CombatStatsListener` hooks:
+- `AfterPlayerTurnStart(Player)` — unambiguous single-param signature,
+  incremented per player turn start.
+- `AfterCardPlayed(PlayerChoiceContext, CardPlay)` — `CardPlay` itself has no
+  Player/Owner reference (checked its full property list), but
+  `CardPlay.Card.Owner` does — attributes the play to whoever's deck the
+  card belongs to.
+
+`PlayerStatsLog`'s per-stage/cumulative builders were generalized from
+damage-specific (`bool dealt`) to a `Func<PlayerCombatRecord, float>`
+selector, so Turns/Cards reuse the exact same fight-grouping logic (and the
+same co-op desync fix) as Damage, rather than duplicating it.
+
+`StatsGraphOverlay` gained a tab row ("Damage & Gold" / "Turns & Cards")
+above the existing Per Stage/Cumulative mode buttons — mode and act filter
+are shared state across both tabs, only which `ChartCanvas` set is
+positioned/visible changes. Chart layout height is now `/ activeCount`
+instead of a hardcoded `/ 3`, so a 2-chart tab and a 3-chart tab both fill
+the available space correctly. **Not yet verified live.**
+
+### Damage source coverage: what's counted and what's approximated
+
+Investigated on request ("does the tracker count poison/doom/special
+damage?"). `Creature.LoseHpInternal` — the low-level HP-reduction primitive —
+has an explicit doc comment: "Hooks and everything are all done in
+CreatureCmd.Damage... there needs to be a really good reason to want to
+avoid them." Confirmed by decompiling `PoisonPower.AfterSideTurnStart`: it
+calls `CreatureCmd.Damage(...)`, the same hooked path as ordinary attacks. So:
+
+- **Already counted, no changes needed**: Poison, Thorns, self-damage cards,
+  and (per that doc comment) essentially anything that reduces HP as a
+  "damage" concept — all confirmed or strongly implied to route through
+  `CreatureCmd.Damage`, which is what fires `Hook.AfterDamageGiven`.
+- **Doom is fundamentally different, not a damage source**: `DoomPower.DoomKill`
+  calls `CreatureCmd.Kill()` directly — an instant execute, never
+  `CreatureCmd.Damage()`. There's no damage *amount* to observe; it fires a
+  separate hook, `AfterDiedToDoom(PlayerChoiceContext, IReadOnlyList<Creature>)`.
+  Added an override for it that approximates "how much this execute was
+  worth" as the creature's `MaxHp`. Multiplayer attribution for the *dealt*
+  side is also approximate — Doom carries no "who applied it" reference the
+  way an attack's dealer/target does, so an enemy dying to Doom is credited
+  to `GameContext.LocalPlayer` rather than whichever player's card/relic
+  actually caused it. **Not yet verified live** (no Doom interaction tested).
+
+### Known pitfall: NCardHolder is a shared widget, not reward-screen-exclusive
+
+Our card reward overlay attaches a Label as a permanent child of `NCardHolder`
+with no cleanup. `NCardHolder` is reused by `NDeckViewScreen` and the
+upgrade/transform/enchant deck-select screens too, not just the reward
+screen — so a holder we decorated kept showing stale Pick/Impact/Synergy
+text wherever it got reused next. Confirmed live: opening the deck viewer
+showed reward-screen stats on cards there. Fixed by tracking every holder we
+decorate (`CardRewardOverlayPatch.DecoratedHolders`) and stripping the label
+in a new patch on `NCardRewardSelectionScreen._ExitTree` (confirmed via
+reflection that method is actually declared on this class, not just
+inherited, before trusting the patch would bind). **Not yet re-verified
+live** — game was mid co-op session when this was built.
+
+### Known pitfall: GameContext.LocalPlayer starts null until the first combat hit
+
+Synergy needs the current deck/relics, sourced from `GameContext.LocalPlayer`
+— which was only ever set from `CombatStatsListener.AfterDamageGiven`, i.e.
+the first hit of the first fight. Every run's very first screen (Neow's /
+the ancient blessing) happens *before* any combat, so Synergy legitimately
+showed `--` there (not a calculation bug — `HasData` was correctly false
+because there was no player reference to build `currentDeckIds` from at
+all). Narrowed by also populating `GameContext.LocalPlayer` from
+`RunStateListener.AfterRewardTaken` (fires the moment any reward, including
+Neow's own relic choice, is claimed) — doesn't fully solve the very first
+render of that very first screen, but stops `--` from persisting through
+every subsequent reward screen before the first fight. No dedicated "run
+started" hook exists to do this properly from the start (see the other
+known pitfall on this).
+
 ### Known pitfall: co-op writes one record per player per fight — group by Timestamp, not by record
 
 First real co-op test (2026-08-31) found the Cumulative damage-dealt line

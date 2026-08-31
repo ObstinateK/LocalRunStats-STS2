@@ -17,18 +17,27 @@ public sealed partial class StatsGraphOverlay : Control
     private const float GraphWidth = 820f;
     private const float GraphHeight = 680f;
 
+    private enum StatTab { DamageGold, TurnsCards }
+
     private static StatsGraphOverlay _instance;
 
+    private StatTab _activeTab = StatTab.DamageGold;
     private bool _perStage = true;
     private int? _actFilter; // null = all acts
+
     private ColorRect _bg;
     private Button _closeButton;
+    private Button _damageGoldTabButton;
+    private Button _turnsCardsTabButton;
     private Button _perStageButton;
     private Button _cumulativeButton;
     private HBoxContainer _actFilterRow;
+
     private ChartCanvas _dealtChart;
     private ChartCanvas _takenChart;
     private ChartCanvas _goldChart;
+    private ChartCanvas _turnsChart;
+    private ChartCanvas _cardsChart;
 
     public static void EnsureAttached(Node root)
     {
@@ -63,28 +72,40 @@ public sealed partial class StatsGraphOverlay : Control
         _closeButton.Pressed += () => Visible = false;
         AddChild(_closeButton);
 
-        _perStageButton = new Button { Text = "Per Stage", Position = new Vector2(16f, 44f), Size = new Vector2(120f, 28f) };
-        _cumulativeButton = new Button { Text = "Cumulative", Position = new Vector2(144f, 44f), Size = new Vector2(120f, 28f) };
+        _damageGoldTabButton = new Button { Text = "Damage & Gold", Position = new Vector2(16f, 44f), Size = new Vector2(140f, 28f) };
+        _turnsCardsTabButton = new Button { Text = "Turns & Cards", Position = new Vector2(164f, 44f), Size = new Vector2(140f, 28f) };
+        _damageGoldTabButton.Pressed += () => SetTab(StatTab.DamageGold);
+        _turnsCardsTabButton.Pressed += () => SetTab(StatTab.TurnsCards);
+        AddChild(_damageGoldTabButton);
+        AddChild(_turnsCardsTabButton);
+
+        _perStageButton = new Button { Text = "Per Stage", Position = new Vector2(16f, 80f), Size = new Vector2(120f, 28f) };
+        _cumulativeButton = new Button { Text = "Cumulative", Position = new Vector2(144f, 80f), Size = new Vector2(120f, 28f) };
         _perStageButton.Pressed += () => SetMode(true);
         _cumulativeButton.Pressed += () => SetMode(false);
         AddChild(_perStageButton);
         AddChild(_cumulativeButton);
 
         // Rebuilt on every Refresh (act list grows as the run progresses).
-        _actFilterRow = new HBoxContainer { Position = new Vector2(16f, 78f) };
+        _actFilterRow = new HBoxContainer { Position = new Vector2(16f, 114f) };
         AddChild(_actFilterRow);
 
         _dealtChart = new ChartCanvas { Title = "Damage Dealt" };
         _takenChart = new ChartCanvas { Title = "Damage Taken" };
         _goldChart = new ChartCanvas { Title = "Gold" };
+        _turnsChart = new ChartCanvas { Title = "Turns Taken" };
+        _cardsChart = new ChartCanvas { Title = "Cards Played" };
         AddChild(_dealtChart);
         AddChild(_takenChart);
         AddChild(_goldChart);
+        AddChild(_turnsChart);
+        AddChild(_cardsChart);
 
         ApplyGeometry();
 
         _instance = this;
         UpdateModeButtonStyles();
+        UpdateTabButtonStyles();
         Refresh();
     }
 
@@ -92,6 +113,10 @@ public sealed partial class StatsGraphOverlay : Control
     {
         if (_instance == this) _instance = null;
     }
+
+    private IReadOnlyList<ChartCanvas> ActiveCharts => _activeTab == StatTab.DamageGold
+        ? new[] { _dealtChart, _takenChart, _goldChart }
+        : new[] { _turnsChart, _cardsChart };
 
     private void ApplyGeometry()
     {
@@ -106,20 +131,35 @@ public sealed partial class StatsGraphOverlay : Control
         _bg.Size = Size;
         _closeButton.Position = new Vector2(w - 44f, 8f);
 
-        var chartTop = 122f; // room for mode buttons (44) + act filter row (78)
+        var chartTop = 158f; // room for tab row (44) + mode buttons (80) + act filter row (114)
         var chartWidth = w - 32f;
-        var chartHeight = System.MathF.Max(60f, (h - chartTop - 16f) / 3f - 8f);
 
-        _dealtChart.Position = new Vector2(16f, chartTop);
-        _dealtChart.Size = new Vector2(chartWidth, chartHeight);
-        _takenChart.Position = new Vector2(16f, chartTop + chartHeight + 12f);
-        _takenChart.Size = new Vector2(chartWidth, chartHeight);
-        _goldChart.Position = new Vector2(16f, chartTop + (chartHeight + 12f) * 2f);
-        _goldChart.Size = new Vector2(chartWidth, chartHeight);
+        var active = ActiveCharts;
+        var chartHeight = System.MathF.Max(60f, (h - chartTop - 16f) / active.Count - 8f);
 
-        _dealtChart.QueueRedraw();
-        _takenChart.QueueRedraw();
-        _goldChart.QueueRedraw();
+        var allCharts = new[] { _dealtChart, _takenChart, _goldChart, _turnsChart, _cardsChart };
+        foreach (var chart in allCharts) chart.Visible = active.Contains(chart);
+
+        for (var i = 0; i < active.Count; i++)
+        {
+            active[i].Position = new Vector2(16f, chartTop + i * (chartHeight + 12f));
+            active[i].Size = new Vector2(chartWidth, chartHeight);
+            active[i].QueueRedraw();
+        }
+    }
+
+    private void SetTab(StatTab tab)
+    {
+        _activeTab = tab;
+        UpdateTabButtonStyles();
+        ApplyGeometry();
+        Refresh();
+    }
+
+    private void UpdateTabButtonStyles()
+    {
+        _damageGoldTabButton.Modulate = _activeTab == StatTab.DamageGold ? Colors.White : new Color(1f, 1f, 1f, 0.55f);
+        _turnsCardsTabButton.Modulate = _activeTab == StatTab.TurnsCards ? Colors.White : new Color(1f, 1f, 1f, 0.55f);
     }
 
     private void SetMode(bool perStage)
@@ -174,8 +214,17 @@ public sealed partial class StatsGraphOverlay : Control
         // is a running total over time -> a line reads better than one bar
         // per fight for a whole run's worth of points.
         var isLine = !_perStage;
-        _dealtChart.SetData(PlayerStatsLog.BuildDamageChartData(_perStage, dealt: true, _actFilter), isLine);
-        _takenChart.SetData(PlayerStatsLog.BuildDamageChartData(_perStage, dealt: false, _actFilter), isLine);
-        _goldChart.SetData(PlayerStatsLog.BuildGoldChartData(_perStage, _actFilter), isLine);
+
+        if (_activeTab == StatTab.DamageGold)
+        {
+            _dealtChart.SetData(PlayerStatsLog.BuildDamageChartData(_perStage, dealt: true, _actFilter), isLine);
+            _takenChart.SetData(PlayerStatsLog.BuildDamageChartData(_perStage, dealt: false, _actFilter), isLine);
+            _goldChart.SetData(PlayerStatsLog.BuildGoldChartData(_perStage, _actFilter), isLine);
+        }
+        else
+        {
+            _turnsChart.SetData(PlayerStatsLog.BuildTurnsChartData(_perStage, _actFilter), isLine);
+            _cardsChart.SetData(PlayerStatsLog.BuildCardsPlayedChartData(_perStage, _actFilter), isLine);
+        }
     }
 }

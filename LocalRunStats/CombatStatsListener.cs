@@ -3,7 +3,9 @@ using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
 using System.Threading.Tasks;
+using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
+using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.GameActions.Multiplayer;
 using MegaCrit.Sts2.Core.Logging;
 using MegaCrit.Sts2.Core.Models;
@@ -86,7 +88,69 @@ public sealed class CombatStatsListener : SingletonModel
         return Task.CompletedTask;
     }
 
-    private PlayerDamageTracker GetOrCreateTracker(MegaCrit.Sts2.Core.Entities.Players.Player player)
+    // Doom is NOT damage — confirmed by decompiling DoomPower.DoomKill, which
+    // calls CreatureCmd.Kill() directly, never CreatureCmd.Damage() (the
+    // shared path that fires AfterDamageGiven and that ordinary attacks,
+    // Poison, Thorns, self-damage cards, etc. all already go through — so
+    // those are already counted with no changes needed). Doom is an instant
+    // execute with no damage number attached to it at all, so this
+    // approximates "how much this execute was worth" as the creature's MaxHp.
+    // Multiplayer attribution for the *dealt* side is also an approximation:
+    // Doom doesn't carry a "who applied it" reference the way an attack's
+    // dealer/target does, so an enemy dying to Doom is credited to
+    // GameContext.LocalPlayer rather than whichever player's card/relic
+    // actually caused it.
+    public override Task AfterDiedToDoom(PlayerChoiceContext context, IReadOnlyList<Creature> creatures)
+    {
+        foreach (var creature in creatures)
+        {
+            if (creature == null) continue;
+            var amount = creature.MaxHp;
+
+            if (creature.IsPlayer)
+            {
+                if (creature.Player == null) continue;
+                _damageTaken += amount;
+                GetOrCreateTracker(creature.Player).CurrentFightTaken += amount;
+            }
+            else
+            {
+                _damageDealt += amount;
+                var localPlayer = GameContext.LocalPlayer;
+                if (localPlayer != null) GetOrCreateTracker(localPlayer).CurrentFightDealt += amount;
+            }
+        }
+        CombatDamageHud.RefreshAll();
+        return Task.CompletedTask;
+    }
+
+    // Signature confirmed via reflection: single unambiguous Player param, no
+    // dealer/target-style swap risk.
+    public override Task AfterPlayerTurnStart(PlayerChoiceContext context, Player player)
+    {
+        if (player != null)
+        {
+            GameContext.LocalPlayer = player;
+            GetOrCreateTracker(player).CurrentFightTurns++;
+        }
+        return Task.CompletedTask;
+    }
+
+    // CardPlay itself carries no Player/Owner reference (checked its full
+    // property list), but CardModel.Owner does — the card knows whose deck
+    // it belongs to, which is what we actually want here anyway (who played
+    // it, not who it's currently targeting).
+    public override Task AfterCardPlayed(PlayerChoiceContext context, CardPlay cardPlay)
+    {
+        var owner = cardPlay?.Card?.Owner;
+        if (owner != null)
+        {
+            GetOrCreateTracker(owner).CurrentFightCardsPlayed++;
+        }
+        return Task.CompletedTask;
+    }
+
+    private PlayerDamageTracker GetOrCreateTracker(Player player)
     {
         if (!_damageByPlayer.TryGetValue(player.NetId, out var tracker))
         {
@@ -138,6 +202,11 @@ public sealed class CombatStatsListener : SingletonModel
                 tracker.TakenByActIndex[actIndex] = existingTaken + tracker.CurrentFightTaken;
                 tracker.CurrentFightTaken = 0;
             }
+            // Turns/cards-played have no ByAct tracking (not shown on the live
+            // HUD) — just reset for the next fight, after WritePerPlayerRecords
+            // already persisted this fight's values.
+            tracker.CurrentFightTurns = 0;
+            tracker.CurrentFightCardsPlayed = 0;
         }
         CombatDamageHud.RefreshAll();
     }
@@ -166,7 +235,8 @@ public sealed class CombatStatsListener : SingletonModel
         var timestamp = DateTime.UtcNow.ToString("o");
         foreach (var (netId, tracker) in Instance._damageByPlayer)
         {
-            if (tracker.CurrentFightDealt == 0 && tracker.CurrentFightTaken == 0) continue;
+            if (tracker.CurrentFightDealt == 0 && tracker.CurrentFightTaken == 0
+                && tracker.CurrentFightTurns == 0 && tracker.CurrentFightCardsPlayed == 0) continue;
             var record = new PlayerCombatRecord
             {
                 Timestamp = timestamp,
@@ -176,6 +246,8 @@ public sealed class CombatStatsListener : SingletonModel
                 CharacterName = tracker.CharacterName,
                 DamageDealt = tracker.CurrentFightDealt,
                 DamageTaken = tracker.CurrentFightTaken,
+                TurnsTaken = tracker.CurrentFightTurns,
+                CardsPlayed = tracker.CurrentFightCardsPlayed,
             };
             PlayerStatsLog.AppendJsonLine("player_combat_stats.jsonl", record);
         }

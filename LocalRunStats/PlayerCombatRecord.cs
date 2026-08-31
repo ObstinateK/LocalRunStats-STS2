@@ -11,6 +11,8 @@ public sealed class PlayerCombatRecord
     public string CharacterName { get; set; } = "";
     public int DamageDealt { get; set; }
     public int DamageTaken { get; set; }
+    public int TurnsTaken { get; set; }
+    public int CardsPlayed { get; set; }
 }
 
 // One row per AfterGoldGained hook fire — cumulative total at that moment,

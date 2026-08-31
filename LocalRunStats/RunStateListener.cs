@@ -1,8 +1,10 @@
 using System;
 using System.IO;
 using System.Text.Json;
+using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Logging;
 using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Rewards;
 
 namespace LocalRunStats;
 
@@ -20,6 +22,20 @@ public sealed class RunStateListener : SingletonModel
     public static RunStateListener Instance => ModelDb.Singleton<RunStateListener>();
 
     public override bool ShouldReceiveCombatHooks => false;
+
+    // Opportunistically populates GameContext.LocalPlayer as early as
+    // possible. Combat is the primary source (CombatStatsListener), but that
+    // means Synergy shows "--" for any reward screen before the first
+    // fight of a run — e.g. Neow's/the ancient blessing choice, which is
+    // always the very first screen. Taking any reward (picking a relic
+    // there counts) fires this before combat ever happens, so it narrows
+    // that gap without needing a dedicated "run started" hook (none exists —
+    // see MOD_SPEC.md).
+    public override System.Threading.Tasks.Task AfterRewardTaken(Player player, Reward reward)
+    {
+        if (player != null) GameContext.LocalPlayer = player;
+        return System.Threading.Tasks.Task.CompletedTask;
+    }
 
     public override bool ShouldAddToDeck(CardModel card)
     {

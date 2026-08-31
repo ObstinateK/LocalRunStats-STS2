@@ -27,11 +27,21 @@ namespace LocalRunStats;
 [HarmonyPatch(typeof(NCardRewardSelectionScreen), nameof(NCardRewardSelectionScreen.RefreshOptions))]
 internal static class CardRewardOverlayPatch
 {
-    private const string LabelName = "LocalRunStatsLabel";
+    internal const string LabelName = "LocalRunStatsLabel";
     private const float LabelWidth = 230f;
     private const float LabelHeight = 200f;
     private const float LabelYOffset = 232f;
     private const float LabelXOffset = -119f;
+
+    // NCardHolder is a shared widget class, not exclusive to this screen —
+    // NDeckViewScreen and friends (deck viewer, upgrade/transform/enchant
+    // select) reuse it too. Our label was a permanent child with no cleanup,
+    // so a holder decorated here that later got reused elsewhere kept
+    // showing our stale reward-screen text — confirmed live: opening the
+    // deck viewer showed Pick/Impact/Synergy on cards there. Track every
+    // holder we've decorated so CardRewardOverlayCleanupPatch can strip the
+    // label the moment this screen actually closes.
+    internal static readonly List<NCardHolder> DecoratedHolders = new();
 
     private static void Postfix(NCardRewardSelectionScreen __instance, IReadOnlyList<CardCreationResult> options, IReadOnlyList<CardRewardAlternative> extraOptions)
     {
@@ -74,6 +84,7 @@ internal static class CardRewardOverlayPatch
             label.Size = new Vector2(LabelWidth, LabelHeight);
             label.CustomMinimumSize = label.Size;
             holder.AddChild(label);
+            DecoratedHolders.Add(holder);
         }
 
         label.Text = BuildStatsText(card);

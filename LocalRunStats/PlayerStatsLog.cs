@@ -77,20 +77,27 @@ public static class PlayerStatsLog
     // actFilter null = all acts. "Per Stage" here means one bar/point per
     // individual fight ("stage" of the run), not per act — act is a
     // separate, orthogonal filter on top of that, not the bucketing itself.
-    public static ChartData BuildDamageChartData(bool perStage, bool dealt, int? actFilter)
+    public static ChartData BuildDamageChartData(bool perStage, bool dealt, int? actFilter) =>
+        BuildFightMetric(perStage, actFilter, r => dealt ? r.DamageDealt : r.DamageTaken);
+
+    public static ChartData BuildTurnsChartData(bool perStage, int? actFilter) =>
+        BuildFightMetric(perStage, actFilter, r => r.TurnsTaken);
+
+    public static ChartData BuildCardsPlayedChartData(bool perStage, int? actFilter) =>
+        BuildFightMetric(perStage, actFilter, r => r.CardsPlayed);
+
+    private static ChartData BuildFightMetric(bool perStage, int? actFilter, Func<PlayerCombatRecord, float> selector)
     {
         var records = FilterToCurrentRun(ReadAllLines<PlayerCombatRecord>("player_combat_stats.jsonl"), r => r.Timestamp);
         if (actFilter.HasValue) records = records.Where(r => r.ActIndex == actFilter.Value).ToList();
-        return perStage
-            ? BuildPerStageDamage(records, dealt)
-            : BuildCumulativeDamage(records, dealt);
+        return perStage ? BuildPerStageFightMetric(records, selector) : BuildCumulativeFightMetric(records, selector);
     }
 
     // One bar-group per fight (grouped by the shared Timestamp all players'
     // records for that fight were written with — see
     // CombatStatsListener.WritePerPlayerRecords), in chronological order.
     // Raw per-fight value, not a running total.
-    private static ChartData BuildPerStageDamage(List<PlayerCombatRecord> records, bool dealt)
+    private static ChartData BuildPerStageFightMetric(List<PlayerCombatRecord> records, Func<PlayerCombatRecord, float> selector)
     {
         var data = new ChartData();
         if (records.Count == 0) return data;
@@ -107,20 +114,20 @@ public static class PlayerStatsLog
             foreach (var name in playerNames)
             {
                 var record = fight.FirstOrDefault(r => r.CharacterName == name);
-                data.SeriesByPlayer[name].Add(record != null ? (dealt ? record.DamageDealt : record.DamageTaken) : 0f);
+                data.SeriesByPlayer[name].Add(record != null ? selector(record) : 0f);
             }
         }
         return data;
     }
 
-    // Group by fight (Timestamp), same as BuildPerStageDamage — a previous
-    // version advanced the x-axis once per RECORD instead of once per FIGHT,
-    // so in co-op a single fight (which writes one record per player, all
-    // sharing the same Timestamp) consumed two x-axis slots for what was
-    // actually one moment. Whichever player's record sorted second then
-    // looked "one fight behind" the other — confirmed live: "fight 1 shows
-    // Ironclad did 0 damage, but it shows up in fight 2."
-    private static ChartData BuildCumulativeDamage(List<PlayerCombatRecord> records, bool dealt)
+    // Group by fight (Timestamp), same as BuildPerStageFightMetric — a
+    // previous version advanced the x-axis once per RECORD instead of once
+    // per FIGHT, so in co-op a single fight (which writes one record per
+    // player, all sharing the same Timestamp) consumed two x-axis slots for
+    // what was actually one moment. Whichever player's record sorted second
+    // then looked "one fight behind" the other — confirmed live: "fight 1
+    // shows Ironclad did 0 damage, but it shows up in fight 2."
+    private static ChartData BuildCumulativeFightMetric(List<PlayerCombatRecord> records, Func<PlayerCombatRecord, float> selector)
     {
         var data = new ChartData();
         if (records.Count == 0) return data;
@@ -140,7 +147,7 @@ public static class PlayerStatsLog
                 var record = fight.FirstOrDefault(r => r.CharacterName == name);
                 if (record != null)
                 {
-                    runningTotals[name] += dealt ? record.DamageDealt : record.DamageTaken;
+                    runningTotals[name] += selector(record);
                 }
                 // Player had no record for this fight (e.g. joined mid-run) ->
                 // carry their running total forward unchanged.
