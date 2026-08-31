@@ -15,6 +15,33 @@ public sealed class PlayerCombatRecord
     public int CardsPlayed { get; set; }
 }
 
+// One row per AfterCardPlayed hook fire — raw play events, not pre-aggregated,
+// so the graph overlay can group/count them however it needs (currently: play
+// count per card name per player, for the whole run).
+public sealed class CardPlayRecord
+{
+    public string Timestamp { get; set; } = "";
+    public ulong PlayerNetId { get; set; }
+    public string CharacterName { get; set; } = "";
+    public string CardName { get; set; } = "";
+}
+
+// One row per (player, card) pair played during a single fight — written at
+// AfterCombatEnd, folded from CombatStatsListener's per-fight counting dict.
+// Distinct from CardPlayRecord (one row per raw play event, used for the
+// whole-run aggregate): this is pre-counted per fight so the graph overlay
+// doesn't need to re-derive fight boundaries from timestamps.
+public sealed class CardPlayCountRecord
+{
+    public string Timestamp { get; set; } = "";
+    public int ActIndex { get; set; }
+    public string EncounterId { get; set; } = "";
+    public ulong PlayerNetId { get; set; }
+    public string CharacterName { get; set; } = "";
+    public string CardName { get; set; } = "";
+    public int Count { get; set; }
+}
+
 // One row per AfterGoldGained hook fire — cumulative total at that moment,
 // not a delta, so a "gold over time" graph is a direct read (consecutive
 // entries per player already show the running total).

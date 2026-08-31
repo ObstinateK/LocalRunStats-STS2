@@ -99,12 +99,18 @@ public sealed partial class ChartCanvas : Control
 
         // Down-sample x labels if there are too many to read (cumulative mode
         // can have one entry per fight across a whole run).
+        // Centered, not left-aligned: both bar groups and line points are
+        // positioned at the group's horizontal CENTER (g*groupWidth +
+        // groupWidth*0.5 — see DrawBars/DrawLines below), so a left-aligned
+        // label at g*groupWidth used to sit under the START of the group
+        // instead of under the actual bar/point, making the axis look
+        // shifted relative to the data it was labeling.
         var labelEvery = System.Math.Max(1, groupCount / 20);
         for (var g = 0; g < groupCount; g++)
         {
             if (g % labelEvery != 0) continue;
             DrawString(font, new Vector2(chartLeft + g * groupWidth, chartBottom + 12f), _data.XLabels[g],
-                HorizontalAlignment.Left, groupWidth, 9, new Color(1f, 1f, 1f, 0.7f));
+                HorizontalAlignment.Center, groupWidth, 9, new Color(1f, 1f, 1f, 0.7f));
         }
 
         if (_isLine)

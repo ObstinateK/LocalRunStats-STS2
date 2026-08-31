@@ -38,6 +38,7 @@ public sealed partial class StatsGraphOverlay : Control
     private ChartCanvas _goldChart;
     private ChartCanvas _turnsChart;
     private ChartCanvas _cardsChart;
+    private CardPlayCountsPanel _cardPlayCountsPanel;
 
     public static void EnsureAttached(Node root)
     {
@@ -95,11 +96,13 @@ public sealed partial class StatsGraphOverlay : Control
         _goldChart = new ChartCanvas { Title = "Gold" };
         _turnsChart = new ChartCanvas { Title = "Turns Taken" };
         _cardsChart = new ChartCanvas { Title = "Cards Played" };
+        _cardPlayCountsPanel = new CardPlayCountsPanel { Title = "Card Play Counts" };
         AddChild(_dealtChart);
         AddChild(_takenChart);
         AddChild(_goldChart);
         AddChild(_turnsChart);
         AddChild(_cardsChart);
+        AddChild(_cardPlayCountsPanel);
 
         ApplyGeometry();
 
@@ -114,9 +117,9 @@ public sealed partial class StatsGraphOverlay : Control
         if (_instance == this) _instance = null;
     }
 
-    private IReadOnlyList<ChartCanvas> ActiveCharts => _activeTab == StatTab.DamageGold
-        ? new[] { _dealtChart, _takenChart, _goldChart }
-        : new[] { _turnsChart, _cardsChart };
+    private IReadOnlyList<Control> ActiveCharts => _activeTab == StatTab.DamageGold
+        ? new Control[] { _dealtChart, _takenChart, _goldChart }
+        : new Control[] { _turnsChart, _cardsChart, _cardPlayCountsPanel };
 
     private void ApplyGeometry()
     {
@@ -137,7 +140,7 @@ public sealed partial class StatsGraphOverlay : Control
         var active = ActiveCharts;
         var chartHeight = System.MathF.Max(60f, (h - chartTop - 16f) / active.Count - 8f);
 
-        var allCharts = new[] { _dealtChart, _takenChart, _goldChart, _turnsChart, _cardsChart };
+        var allCharts = new Control[] { _dealtChart, _takenChart, _goldChart, _turnsChart, _cardsChart, _cardPlayCountsPanel };
         foreach (var chart in allCharts) chart.Visible = active.Contains(chart);
 
         for (var i = 0; i < active.Count; i++)
@@ -225,6 +228,7 @@ public sealed partial class StatsGraphOverlay : Control
         {
             _turnsChart.SetData(PlayerStatsLog.BuildTurnsChartData(_perStage, _actFilter), isLine);
             _cardsChart.SetData(PlayerStatsLog.BuildCardsPlayedChartData(_perStage, _actFilter), isLine);
+            _cardPlayCountsPanel.SetBbcode(PlayerStatsLog.BuildCardPlayCountsBbcode());
         }
     }
 }

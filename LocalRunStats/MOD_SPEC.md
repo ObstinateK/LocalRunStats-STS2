@@ -366,3 +366,118 @@ combat, since the exception fired inside the `ModHelper.SubscribeForCombatStateH
 delegate, which runs at combat-hook-iteration time, not at mod-init time).
 Fix: derive custom listener models from `SingletonModel` and fetch the
 already-registered instance via `ModelDb.Singleton<T>()` instead of `new`.
+
+### Fixed 2026-08-31: chart x-axis labels didn't line up with the data
+
+Reported live: a co-op "Damage Dealt" cumulative chart showed a line that
+looked shifted right relative to its "1"/"2" x-axis labels. Root cause in
+`ChartCanvas._Draw`: line points (`DrawLines`) and bar groups (`DrawBars`)
+are positioned at each group's horizontal **center**
+(`g * groupWidth + groupWidth * 0.5`), but the x-axis label loop drew each
+label **left-aligned** starting at the group's edge (`g * groupWidth`) — so a
+label sat under the *start* of its group instead of under the point/bars it
+was labeling, and the mismatch got more visible the fewer groups (fights)
+there were. Fixed by drawing labels with `HorizontalAlignment.Center` over
+the same `groupWidth`-wide box instead of `Left`, so they align with both
+bar groups and line points without needing separate logic per chart type.
+
+### Fixed 2026-08-31: Doom-kill damage credited to the wrong co-op player
+
+Reported live: "the amount is given to another character." Root cause:
+`AfterDiedToDoom` had no dealer reference for who applied the Doom (Doom
+kills go through `DoomPower.DoomKill` → `CreatureCmd.Kill`, never
+`CreatureCmd.Damage`, so there's no `dealer` param at all), so it fell back
+to crediting `GameContext.LocalPlayer` — a single shared static that gets
+overwritten by *whichever player most recently dealt/took damage or started
+a turn*. In co-op that's frequently not the player whose Doom stacks
+actually killed the creature.
+Fix: `PowerModel.Applier` (set at `PowerCmd.Apply` time) records which
+Creature applied a power, including `DoomPower`. The catch: by the time
+`Hook.AfterDiedToDoom` fires for the whole killed batch,
+`CreatureCmd.KillWithoutCheckingWinCondition` has already called
+`creature.RemoveAllPowersAfterDeath()` on every one of them, so their
+`Powers` list (and therefore the `DoomPower.Applier`) is already gone.
+Confirmed via decompile that `Hook.BeforeDeath(creature)` fires earlier in
+the same method, *before* powers are stripped — so `CombatStatsListener` now
+overrides `BeforeDeath`, checks for a live `DoomPower` on the dying creature,
+and caches its `Applier` in `_pendingDoomApplier` (keyed by `Creature`,
+cleared at combat end/run reset so a prevented death can't leak a stale
+entry). `AfterDiedToDoom` consumes that cache first and only falls back to
+`GameContext.LocalPlayer` if no Applier was captured (e.g. a relic-sourced
+Doom with no Creature applier).
+
+### Fixed 2026-08-31: Osty's damage was silently dropped, then made asymmetric on purpose
+
+Decompiling `CreatureCmd.Damage` showed a hit absorbed by Osty (via the
+`DieForYou` redirect) fires `AfterDamageGiven` with `target` = the Osty
+Creature itself, not the player — `Osty.IsPlayer` is `false` (it's a
+`Monster`-backed pet, see `Creature.IsPet`/`Creature.PetOwner`), so a plain
+`target.IsPlayer` check silently dropped 100% of Osty's damage taken. Fixed
+attribution is **intentionally asymmetric** per explicit user direction:
+- **Dealt**: counts for the pet owner. Confirmed via a real card
+  ("Unleash": *"Osty deals 6 damage. Deals additional damage equal to
+  Osty's current HP."*) that Osty CAN deal damage through player-cast cards,
+  even though its own `MonsterMoveStateMachine` is a do-nothing state (it
+  never attacks on its own AI turn) — that damage should still count as the
+  player's.
+- **Taken**: explicitly excluded. Osty soaking a hit is meant to behave like
+  extra Block, not like the player getting hit — per the user: "damage osty
+  takes [should] essentially act as additional block, since that is not
+  damage my character has taken."
+
+`CombatStatsListener` has two resolvers reflecting this:
+`ResolveDealerPlayer` (`IsPlayer` OR `IsPet → PetOwner`) and
+`ResolveTakenPlayer` (`IsPlayer` only). `AfterDiedToDoom` mirrors this too:
+a pet dying to Doom is skipped entirely (`if (creature.IsPet) continue;`) —
+neither taken (per the above) nor an "enemy died" dealt-credit.
+
+### Added 2026-08-31: per-fight card play breakdown
+
+The existing whole-run "which cards, how many times" panel
+(`card_plays.jsonl`, one row per raw play event) was working well, but the
+user wanted it split out per individual fight too ("separate lists per fight
+so I can see how many of which card I have used in each fight"). Rather than
+reconstruct fight boundaries from `card_plays.jsonl`'s scattered per-play
+timestamps, `CombatStatsListener` now also tracks an in-memory
+`Dictionary<ulong netId, Dictionary<string cardName, int count>>` per fight
+(`_cardPlayCountsThisFight`, incremented in `AfterCardPlayed` alongside the
+existing raw-event log), folded into a new `card_play_fights.jsonl` at
+`AfterCombatEnd` — one row per (player, card) pair, same
+Timestamp/ActIndex/EncounterId shape as `PlayerCombatRecord`. Both files
+coexist: `PlayerStatsLog.BuildCardPlayCountsBbcode()` now renders the overall
+totals first, then a "--- By Fight ---" section grouping
+`card_play_fights.jsonl` by Timestamp (same convention as
+`BuildPerStageFightMetric`) with one card table per player per fight.
+
+### Fixed 2026-08-31: poison damage dealt to enemies wasn't counted
+
+Reported live, after the batch below shipped: "poison damage was not being
+accounted for." Decompiling `PoisonPower.AfterSideTurnStart` explained why:
+a poison tick calls `CreatureCmd.Damage(ctx, base.Owner, base.Amount, ...,
+dealer: null, cardSource: null)` — always `dealer: null`, since the tick is
+self-inflicted by the power on its own owner each side-turn-start, with no
+reference to whoever originally stacked the poison. The "taken" side of
+`AfterDamageGiven` still worked fine (it's `target`-based and never needed a
+dealer), but the "dealt" side does need one, so 100% of poison damage a
+player applied to an enemy was silently dropped. Fixed the same way as the
+Doom-applier fix below: read `PowerModel.Applier` — here, straight off the
+ticking creature's still-live `PoisonPower` (no death/`BeforeDeath` caching
+needed this time, since the creature doesn't die from a single tick and
+`PowerCmd.Decrement` — which can remove the power at 0 stacks — only runs
+*after* `CreatureCmd.Damage` and this hook complete). Gated strictly on
+`dealer == null` so a normal attack from an enemy that also happens to be
+poisoned can't get misattributed to whoever applied that poison. Same
+multi-source caveat as Doom: if two co-op players poison the same enemy,
+`Applier` only reflects the most recent stacker.
+
+### Not yet verified live (2026-08-31 batch)
+
+None of the following have been tested in-game yet as of this note — all
+built and deployed pending the user closing/reopening the game:
+- Chart x-axis label centering fix.
+- Doom-kill Applier attribution via the new `BeforeDeath` cache.
+- Osty dealt/taken asymmetric attribution (including the "Unleash"-style
+  card-dealt-through-Osty path).
+- Per-fight card play breakdown (`card_play_fights.jsonl` + the "By Fight"
+  BBCode section).
+- Poison-damage-dealt Applier fix (just added, above).

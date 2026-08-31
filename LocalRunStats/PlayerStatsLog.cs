@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Text;
 using System.Text.Json;
 using MegaCrit.Sts2.Core.Logging;
 
@@ -219,6 +220,73 @@ public static class PlayerStatsLog
         }
         return data;
     }
+
+    // Per-player breakdown of which cards were played and how many times,
+    // for the whole run so far (no act filter — "how many times has this
+    // card been played" is a run-wide question, not a per-act one), followed
+    // by the same breakdown split out per individual fight. Rendered as
+    // BBCode text (by CardPlayCountsPanel) rather than a chart: card names
+    // have no natural x-axis ordering the way fights/turns do.
+    public static string BuildCardPlayCountsBbcode()
+    {
+        var sb = new StringBuilder();
+        sb.Append(BuildOverallCardPlayCounts());
+        sb.Append("\n[b]--- By Fight ---[/b]\n");
+        sb.Append(BuildCardPlayCountsByFight());
+        return sb.ToString();
+    }
+
+    private static string BuildOverallCardPlayCounts()
+    {
+        var records = FilterToCurrentRun(ReadAllLines<CardPlayRecord>("card_plays.jsonl"), r => r.Timestamp);
+        if (records.Count == 0) return "(no cards played yet)";
+
+        var sb = new StringBuilder();
+        foreach (var playerGroup in records.GroupBy(r => r.CharacterName))
+        {
+            sb.Append($"[b]{Escape(playerGroup.Key)}[/b]\n[table=2]");
+            var counts = playerGroup.GroupBy(r => r.CardName)
+                .Select(g => (Name: g.Key, Count: g.Count()))
+                .OrderByDescending(c => c.Count)
+                .ThenBy(c => c.Name, StringComparer.Ordinal);
+            foreach (var (name, count) in counts)
+            {
+                sb.Append($"[cell]{Escape(name)}[/cell][cell]x{count}[/cell]");
+            }
+            sb.Append("[/table]\n");
+        }
+        return sb.ToString();
+    }
+
+    // One block per fight (grouped by the shared Timestamp all players'
+    // records for that fight were written with, same convention as
+    // BuildPerStageFightMetric), each with its own per-player card table.
+    private static string BuildCardPlayCountsByFight()
+    {
+        var records = FilterToCurrentRun(ReadAllLines<CardPlayCountRecord>("card_play_fights.jsonl"), r => r.Timestamp);
+        if (records.Count == 0) return "(no fights yet)";
+
+        var sb = new StringBuilder();
+        var fights = records.GroupBy(r => r.Timestamp).OrderBy(g => g.Key).ToList();
+        var stageIndex = 0;
+        foreach (var fight in fights)
+        {
+            stageIndex++;
+            sb.Append($"[b]Fight {stageIndex}: {Escape(ShortenEncounterId(fight.First().EncounterId, stageIndex))}[/b]\n");
+            foreach (var playerGroup in fight.GroupBy(r => r.CharacterName))
+            {
+                sb.Append($"{Escape(playerGroup.Key)}\n[table=2]");
+                foreach (var row in playerGroup.OrderByDescending(r => r.Count).ThenBy(r => r.CardName, StringComparer.Ordinal))
+                {
+                    sb.Append($"[cell]{Escape(row.CardName)}[/cell][cell]x{row.Count}[/cell]");
+                }
+                sb.Append("[/table]\n");
+            }
+        }
+        return sb.ToString();
+    }
+
+    private static string Escape(string s) => s.Replace("[", "[lb]");
 
     private static string ShortenEncounterId(string encounterId, int fallbackIndex)
     {

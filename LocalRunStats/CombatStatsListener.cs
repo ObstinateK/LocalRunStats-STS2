@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
 using MegaCrit.Sts2.Core.Entities.Cards;
@@ -9,6 +10,7 @@ using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.GameActions.Multiplayer;
 using MegaCrit.Sts2.Core.Logging;
 using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Models.Powers;
 using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.ValueProps;
 
@@ -39,6 +41,24 @@ public sealed class CombatStatsListener : SingletonModel
 
     public IReadOnlyDictionary<ulong, PlayerDamageTracker> DamageByPlayer => _damageByPlayer;
 
+    // Doom kills carry no dealer reference (see AfterDiedToDoom below), so the
+    // Applier of the creature's DoomPower is captured here in BeforeDeath —
+    // the last point at which the dying creature's Powers list is still
+    // intact, before CreatureCmd.KillWithoutCheckingWinCondition strips it via
+    // RemoveAllPowersAfterDeath() (confirmed by decompile: BeforeDeath fires,
+    // then powers are removed, then eventually Hook.AfterDiedToDoom fires for
+    // the whole batch). Keyed by the dying Creature; consumed and removed in
+    // AfterDiedToDoom, and cleared defensively at combat end/run reset so a
+    // prevented death (Fairy in a Bottle, etc.) can't leak a stale entry.
+    private readonly Dictionary<Creature, Creature> _pendingDoomApplier = new();
+
+    // Per-fight card play counts, keyed by Player.NetId then card name.
+    // Folded into card_play_fights.jsonl at AfterCombatEnd (one row per
+    // player-card pair, mirroring WritePerPlayerRecords) so the graph
+    // overlay can show a per-fight breakdown alongside the existing
+    // whole-run card_plays.jsonl aggregate.
+    private readonly Dictionary<ulong, Dictionary<string, int>> _cardPlayCountsThisFight = new();
+
     public override bool ShouldReceiveCombatHooks => true;
 
     // This SingletonModel lives for the whole game process, not per-run — the
@@ -49,7 +69,41 @@ public sealed class CombatStatsListener : SingletonModel
     // run's per-player/per-act damage numbers showing in the new run's HUD —
     // and inflates the table's act-column count too, since that's derived
     // from the max act index across all cached data.
-    public void ResetForNewRun() => _damageByPlayer.Clear();
+    public void ResetForNewRun()
+    {
+        _damageByPlayer.Clear();
+        _pendingDoomApplier.Clear();
+        _cardPlayCountsThisFight.Clear();
+    }
+
+    // Attribution is deliberately ASYMMETRIC between dealing and taking:
+    //
+    // Dealt: a pet's (IsPet, e.g. Necrobinder's Osty) damage counts toward its
+    // owner's Damage Dealt. Osty has no attack move of its own (its
+    // MonsterMoveStateMachine is a do-nothing state), but player-cast cards
+    // can still make it deal damage directly (e.g. "Unleash": "Osty deals 6
+    // damage...") — that's still damage the player caused and should count as
+    // theirs.
+    //
+    // Taken: only the player's own combat Creature counts. Confirmed via
+    // decompiling CreatureCmd.Damage that when Osty absorbs a hit via
+    // DieForYou, the resulting DamageResult's Receiver (and therefore
+    // AfterDamageGiven's `target`) is Osty itself, not the player — but
+    // that's explicitly NOT wanted here: Osty soaking a hit should behave
+    // like extra Block, not like the player taking damage, so it's excluded.
+    private static Player ResolveDealerPlayer(Creature creature)
+    {
+        if (creature == null) return null;
+        if (creature.IsPlayer) return creature.Player;
+        if (creature.IsPet) return creature.PetOwner;
+        return null;
+    }
+
+    private static Player ResolveTakenPlayer(Creature creature)
+    {
+        if (creature == null || !creature.IsPlayer) return null;
+        return creature.Player;
+    }
 
     // Parameter names/order verified by decompiling the real caller,
     // Hook.AfterDamageGiven: `model.AfterDamageGiven(choiceContext, dealer,
@@ -61,30 +115,53 @@ public sealed class CombatStatsListener : SingletonModel
     // so this doesn't happen again.
     public override Task AfterDamageGiven(PlayerChoiceContext context, Creature dealer, DamageResult damageResult, ValueProp props, Creature target, CardModel card)
     {
-        if (dealer != null && dealer.IsPlayer)
+        // Poison ticks pass dealer=null — confirmed by decompiling
+        // PoisonPower.AfterSideTurnStart: `CreatureCmd.Damage(ctx, base.Owner,
+        // base.Amount, ..., dealer: null, cardSource: null)`. A poison tick is
+        // self-inflicted by the power on its own owner each side-turn-start,
+        // independent of who originally stacked it, so there's no dealer
+        // reference at all here — which silently dropped every bit of poison
+        // damage from "damage dealt" (the "taken" side still worked, since
+        // that's target-based and doesn't need a dealer). Recovered by reading
+        // the ticking creature's own PoisonPower.Applier, which is still set
+        // at this point: PowerCmd.Decrement (which can remove the power once
+        // it hits 0) only runs AFTER CreatureCmd.Damage/this hook completes.
+        // Approximation, same caveat as Doom's Applier lookup: if two players
+        // both poison the same enemy, only the most recent stacker's Applier
+        // is on record. Gated strictly on `dealer == null` (not just a failed
+        // ResolveDealerPlayer) so a normal enemy attack on an already-poisoned
+        // player can't get misattributed to whoever applied that poison.
+        var dealerPlayer = dealer != null
+            ? ResolveDealerPlayer(dealer)
+            : ResolveDealerPlayer(target?.Powers?.OfType<PoisonPower>().FirstOrDefault()?.Applier);
+        if (dealerPlayer != null)
         {
             // UnblockedDamage, not TotalDamage: TotalDamage is the attack's raw
             // output before the target's own Block absorbs part of it. "Damage
             // dealt"/"taken" both mean HP actually removed, not raw attack value.
             _damageDealt += damageResult.UnblockedDamage;
-            if (dealer.Player != null)
-            {
-                GameContext.LocalPlayer = dealer.Player;
-                GetOrCreateTracker(dealer.Player).CurrentFightDealt += damageResult.UnblockedDamage;
-                CombatDamageHud.RefreshAll();
-            }
+            GameContext.LocalPlayer = dealerPlayer;
+            GetOrCreateTracker(dealerPlayer).CurrentFightDealt += damageResult.UnblockedDamage;
+            CombatDamageHud.RefreshAll();
         }
-        if (target != null && target.IsPlayer)
+        var targetPlayer = ResolveTakenPlayer(target);
+        if (targetPlayer != null)
         {
             _damageTaken += damageResult.UnblockedDamage;
             _damageBlocked += damageResult.BlockedDamage;
-            if (target.Player != null)
-            {
-                GameContext.LocalPlayer = target.Player;
-                GetOrCreateTracker(target.Player).CurrentFightTaken += damageResult.UnblockedDamage;
-                CombatDamageHud.RefreshAll();
-            }
+            GameContext.LocalPlayer = targetPlayer;
+            GetOrCreateTracker(targetPlayer).CurrentFightTaken += damageResult.UnblockedDamage;
+            CombatDamageHud.RefreshAll();
         }
+        return Task.CompletedTask;
+    }
+
+    // Captures the Applier of a dying creature's DoomPower (if it has one)
+    // before RemoveAllPowersAfterDeath strips it — see _pendingDoomApplier.
+    public override Task BeforeDeath(Creature creature)
+    {
+        var doom = creature?.Powers?.OfType<DoomPower>().FirstOrDefault();
+        if (doom != null) _pendingDoomApplier[creature] = doom.Applier;
         return Task.CompletedTask;
     }
 
@@ -107,18 +184,35 @@ public sealed class CombatStatsListener : SingletonModel
             if (creature == null) continue;
             var amount = creature.MaxHp;
 
-            if (creature.IsPlayer)
+            _pendingDoomApplier.Remove(creature, out var applier);
+
+            // Pets (Osty) are out of scope entirely, same as in
+            // AfterDamageGiven — Osty dying to Doom is neither the player
+            // taking damage nor an enemy dying, so it's not attributed
+            // anywhere.
+            if (creature.IsPet) continue;
+
+            // Player's own Creature dying to Doom counts as damage taken.
+            var owningPlayer = ResolveTakenPlayer(creature);
+            if (owningPlayer != null)
             {
-                if (creature.Player == null) continue;
                 _damageTaken += amount;
-                GetOrCreateTracker(creature.Player).CurrentFightTaken += amount;
+                GetOrCreateTracker(owningPlayer).CurrentFightTaken += amount;
+                continue;
             }
-            else
-            {
-                _damageDealt += amount;
-                var localPlayer = GameContext.LocalPlayer;
-                if (localPlayer != null) GetOrCreateTracker(localPlayer).CurrentFightDealt += amount;
-            }
+
+            // Enemy died to Doom -> credited as damage dealt. Prefer the
+            // creature that actually applied the killing Doom stacks (captured
+            // in BeforeDeath) over GameContext.LocalPlayer: that static is just
+            // "whichever player most recently dealt/took damage or started a
+            // turn," which in co-op is frequently the WRONG player — confirmed
+            // live ("doom damage... the amount is given to another
+            // character"). Falls back to GameContext.LocalPlayer only if no
+            // DoomPower/Applier could be found (e.g. Doom applied by a source
+            // with no Creature applier, like some relics).
+            _damageDealt += amount;
+            var creditedPlayer = ResolveDealerPlayer(applier) ?? GameContext.LocalPlayer;
+            if (creditedPlayer != null) GetOrCreateTracker(creditedPlayer).CurrentFightDealt += amount;
         }
         CombatDamageHud.RefreshAll();
         return Task.CompletedTask;
@@ -146,6 +240,21 @@ public sealed class CombatStatsListener : SingletonModel
         if (owner != null)
         {
             GetOrCreateTracker(owner).CurrentFightCardsPlayed++;
+            PlayerStatsLog.AppendJsonLine("card_plays.jsonl", new CardPlayRecord
+            {
+                Timestamp = DateTime.UtcNow.ToString("o"),
+                PlayerNetId = owner.NetId,
+                CharacterName = owner.Character?.Title?.GetRawText() ?? "?",
+                CardName = cardPlay.Card.Title,
+            });
+
+            if (!_cardPlayCountsThisFight.TryGetValue(owner.NetId, out var counts))
+            {
+                counts = new Dictionary<string, int>();
+                _cardPlayCountsThisFight[owner.NetId] = counts;
+            }
+            counts.TryGetValue(cardPlay.Card.Title, out var existing);
+            counts[cardPlay.Card.Title] = existing + 1;
         }
         return Task.CompletedTask;
     }
@@ -170,6 +279,7 @@ public sealed class CombatStatsListener : SingletonModel
         {
             WriteAggregateRecord(combatRoom);
             WritePerPlayerRecords(combatRoom);
+            WriteCardPlayCountsByFight(combatRoom);
             FoldCurrentFightIntoActTotals(combatRoom);
         }
         catch (Exception ex)
@@ -181,8 +291,42 @@ public sealed class CombatStatsListener : SingletonModel
             _damageDealt = 0;
             _damageTaken = 0;
             _damageBlocked = 0;
+            // Any entries left here belong to deaths that were prevented
+            // (Fairy in a Bottle, etc.) and never reached AfterDiedToDoom to
+            // consume them — drop them rather than let them leak into the
+            // next fight.
+            _pendingDoomApplier.Clear();
+            _cardPlayCountsThisFight.Clear();
         }
         return Task.CompletedTask;
+    }
+
+    // One row per (player, card) pair played during the fight that just
+    // ended, feeding the graph overlay's per-fight card breakdown. Shares the
+    // CharacterName already populated in _damageByPlayer by GetOrCreateTracker
+    // (called for every card play, so it's guaranteed set for anyone in here).
+    private static void WriteCardPlayCountsByFight(CombatRoom combatRoom)
+    {
+        var actIndex = combatRoom.Act?.Index ?? 0;
+        var timestamp = DateTime.UtcNow.ToString("o");
+        foreach (var (netId, counts) in Instance._cardPlayCountsThisFight)
+        {
+            Instance._damageByPlayer.TryGetValue(netId, out var tracker);
+            var characterName = tracker?.CharacterName ?? "?";
+            foreach (var (cardName, count) in counts)
+            {
+                PlayerStatsLog.AppendJsonLine("card_play_fights.jsonl", new CardPlayCountRecord
+                {
+                    Timestamp = timestamp,
+                    ActIndex = actIndex,
+                    EncounterId = combatRoom.ModelId.ToString(),
+                    PlayerNetId = netId,
+                    CharacterName = characterName,
+                    CardName = cardName,
+                    Count = count,
+                });
+            }
+        }
     }
 
     private void FoldCurrentFightIntoActTotals(CombatRoom combatRoom)
