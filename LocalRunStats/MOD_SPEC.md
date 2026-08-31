@@ -208,6 +208,26 @@ specific deck (negative Synergy), or vice versa.
         `CombatDamageHud`). Both panels are now fully tuned — `HudTuning.cs`
         and `HudTuningPanel.cs` (the dev-only slider tool) were deleted.
 
+### Known pitfall: co-op writes one record per player per fight — group by Timestamp, not by record
+
+First real co-op test (2026-08-31) found the Cumulative damage-dealt line
+chart desynced between players: fight 1 showed one player did 0 damage, but
+it "caught up" a fight late. Root cause: `CombatStatsListener.WritePerPlayerRecords`
+writes one `PlayerCombatRecord` per player per fight, and all of a fight's
+records share the same `Timestamp`. `BuildPerStageDamage` already grouped by
+that shared `Timestamp` correctly (one bucket per *fight*), but
+`BuildCumulativeDamage` didn't — it advanced the x-axis once per *record*, so
+a 2-player fight ate two x-axis slots for one real moment, and whichever
+player's record sorted second landed one slot late. Fixed by grouping by
+`Timestamp` first in `BuildCumulativeDamage` too (and applied the same fix to
+gold's cumulative mode, which had the analogous bug: it aligned by each
+player's own event index rather than actual chronological moment — two
+players' independent gold pickups aren't the same "moment" just because
+they're both each player's 3rd pickup). **Fixed but not yet re-verified live**
+— built and compiled clean, not deployed/tested this round since the game
+was mid-session and the user asked not to relaunch it. Re-check the
+Cumulative charts in the next co-op session.
+
 ### Known limitation: `OnMetricsUpload` gating
 
 Decompiled `MetricUtilities.UploadRunMetricsInternal` — `ModManager.CallMetricsHooks`

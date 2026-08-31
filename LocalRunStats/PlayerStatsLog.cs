@@ -113,41 +113,38 @@ public static class PlayerStatsLog
         return data;
     }
 
+    // Group by fight (Timestamp), same as BuildPerStageDamage — a previous
+    // version advanced the x-axis once per RECORD instead of once per FIGHT,
+    // so in co-op a single fight (which writes one record per player, all
+    // sharing the same Timestamp) consumed two x-axis slots for what was
+    // actually one moment. Whichever player's record sorted second then
+    // looked "one fight behind" the other — confirmed live: "fight 1 shows
+    // Ironclad did 0 damage, but it shows up in fight 2."
     private static ChartData BuildCumulativeDamage(List<PlayerCombatRecord> records, bool dealt)
     {
         var data = new ChartData();
         if (records.Count == 0) return data;
 
-        var ordered = records.OrderBy(r => r.Timestamp).ToList();
-        var runningTotals = new Dictionary<string, float>();
-        var fightIndex = 0;
+        var playerNames = records.Select(r => r.CharacterName).Distinct().ToList();
+        var runningTotals = playerNames.ToDictionary(n => n, _ => 0f);
+        foreach (var name in playerNames) data.SeriesByPlayer[name] = new List<float>();
 
-        foreach (var r in ordered)
+        var fights = records.GroupBy(r => r.Timestamp).OrderBy(g => g.Key).ToList();
+        var fightIndex = 0;
+        foreach (var fight in fights)
         {
             fightIndex++;
-            runningTotals.TryGetValue(r.CharacterName, out var total);
-            total += dealt ? r.DamageDealt : r.DamageTaken;
-            runningTotals[r.CharacterName] = total;
-
             data.XLabels.Add(fightIndex.ToString());
-            foreach (var name in runningTotals.Keys.ToList())
+            foreach (var name in playerNames)
             {
-                if (!data.SeriesByPlayer.TryGetValue(name, out var series))
+                var record = fight.FirstOrDefault(r => r.CharacterName == name);
+                if (record != null)
                 {
-                    series = new List<float>(new float[data.XLabels.Count - 1]); // pad so all series stay aligned to XLabels
-                    data.SeriesByPlayer[name] = series;
+                    runningTotals[name] += dealt ? record.DamageDealt : record.DamageTaken;
                 }
-                series.Add(runningTotals[name]);
-            }
-            // Any series that didn't get a point this iteration (a player who
-            // exists but wasn't the one updated) still needs padding to stay
-            // aligned with XLabels — repeat their last known value.
-            foreach (var kvp in data.SeriesByPlayer)
-            {
-                while (kvp.Value.Count < data.XLabels.Count)
-                {
-                    kvp.Value.Add(kvp.Value.Count > 0 ? kvp.Value[^1] : 0f);
-                }
+                // Player had no record for this fight (e.g. joined mid-run) ->
+                // carry their running total forward unchanged.
+                data.SeriesByPlayer[name].Add(runningTotals[name]);
             }
         }
         return data;
@@ -190,18 +187,27 @@ public static class PlayerStatsLog
         }
         else
         {
-            var byPlayer = ordered.GroupBy(r => r.CharacterName).ToDictionary(g => g.Key, g => g.ToList());
-            var maxCount = byPlayer.Values.Max(v => v.Count);
-            for (var i = 0; i < maxCount; i++) data.XLabels.Add(i.ToString());
+            // Same fix as BuildCumulativeDamage: align by actual chronological
+            // moment (grouped by Timestamp), not by each player's own event
+            // index — two players' gold events are independent, so "player A's
+            // 3rd pickup" and "player B's 3rd pickup" are not the same moment
+            // and shouldn't share an x-axis slot.
+            var playerNames = ordered.Select(r => r.CharacterName).Distinct().ToList();
+            var lastKnown = playerNames.ToDictionary(n => n, _ => 0f);
+            foreach (var name in playerNames) data.SeriesByPlayer[name] = new List<float>();
 
-            foreach (var (name, list) in byPlayer)
+            var moments = ordered.GroupBy(r => r.Timestamp).OrderBy(g => g.Key).ToList();
+            var index = 0;
+            foreach (var moment in moments)
             {
-                var series = new List<float>();
-                for (var i = 0; i < maxCount; i++)
+                index++;
+                data.XLabels.Add(index.ToString());
+                foreach (var name in playerNames)
                 {
-                    series.Add(i < list.Count ? list[i].CurrentGold : (series.Count > 0 ? series[^1] : 0f));
+                    var record = moment.FirstOrDefault(r => r.CharacterName == name);
+                    if (record != null) lastKnown[name] = record.CurrentGold;
+                    data.SeriesByPlayer[name].Add(lastKnown[name]);
                 }
-                data.SeriesByPlayer[name] = series;
             }
         }
         return data;
