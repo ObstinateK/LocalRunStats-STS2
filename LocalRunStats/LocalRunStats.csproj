@@ -4,8 +4,17 @@
     <EnableDynamicLoading>true</EnableDynamicLoading>
     <RootNamespace>LocalRunStats</RootNamespace>
     <AssemblyName>local-run-stats</AssemblyName>
-    <Sts2Path Condition="'$(Sts2Path)' == '' and Exists('D:\SteamLibrary\steamapps\common\Slay the Spire 2')">D:\SteamLibrary\steamapps\common\Slay the Spire 2</Sts2Path>
+    <!-- Steam's own default install location. -->
     <Sts2Path Condition="'$(Sts2Path)' == '' and Exists('C:\Program Files (x86)\Steam\steamapps\common\Slay the Spire 2')">C:\Program Files (x86)\Steam\steamapps\common\Slay the Spire 2</Sts2Path>
+    <Sts2Path Condition="'$(Sts2Path)' == '' and Exists('C:\Program Files\Steam\steamapps\common\Slay the Spire 2')">C:\Program Files\Steam\steamapps\common\Slay the Spire 2</Sts2Path>
+    <!-- Common custom Steam library folder names/drives. -->
+    <Sts2Path Condition="'$(Sts2Path)' == '' and Exists('C:\SteamLibrary\steamapps\common\Slay the Spire 2')">C:\SteamLibrary\steamapps\common\Slay the Spire 2</Sts2Path>
+    <Sts2Path Condition="'$(Sts2Path)' == '' and Exists('D:\SteamLibrary\steamapps\common\Slay the Spire 2')">D:\SteamLibrary\steamapps\common\Slay the Spire 2</Sts2Path>
+    <Sts2Path Condition="'$(Sts2Path)' == '' and Exists('E:\SteamLibrary\steamapps\common\Slay the Spire 2')">E:\SteamLibrary\steamapps\common\Slay the Spire 2</Sts2Path>
+    <Sts2Path Condition="'$(Sts2Path)' == '' and Exists('F:\SteamLibrary\steamapps\common\Slay the Spire 2')">F:\SteamLibrary\steamapps\common\Slay the Spire 2</Sts2Path>
+    <Sts2Path Condition="'$(Sts2Path)' == '' and Exists('D:\Steam\steamapps\common\Slay the Spire 2')">D:\Steam\steamapps\common\Slay the Spire 2</Sts2Path>
+    <Sts2Path Condition="'$(Sts2Path)' == '' and Exists('E:\Steam\steamapps\common\Slay the Spire 2')">E:\Steam\steamapps\common\Slay the Spire 2</Sts2Path>
+    <Sts2Path Condition="'$(Sts2Path)' == '' and Exists('F:\Steam\steamapps\common\Slay the Spire 2')">F:\Steam\steamapps\common\Slay the Spire 2</Sts2Path>
     <Sts2DataDir Condition="'$(Sts2DataDir)' == '' and '$(Sts2Path)' != ''">$(Sts2Path)\data_sts2_windows_x86_64</Sts2DataDir>
     <Sts2Dll Condition="'$(Sts2Dll)' == '' and Exists('$(Sts2DataDir)\sts2.dll')">$(Sts2DataDir)\sts2.dll</Sts2Dll>
     <Sts2Dll Condition="'$(Sts2Dll)' == ''">$(MSBuildProjectDirectory)\sts2.dll</Sts2Dll>
