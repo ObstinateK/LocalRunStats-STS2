@@ -123,6 +123,12 @@ specific deck (negative Synergy), or vice versa.
   (`ModManager.TryLoadMod` does `Path.Combine(mod.path, modId + ".dll")`),
   not the mod's display name. Set `<AssemblyName>` in the csproj accordingly.
   Same rule applies to `.pck` if `has_pck` is ever set.
+- Local install: `pull-and-install.ps1` fast-forwards `main` and `dotnet build`s
+  Release. The csproj copies `local-run-stats.dll` + `LocalRunStats.json` into
+  `<STS2>/mods/LocalRunStats` when it can see a Steam install (`Sts2Path`, or
+  the common `SteamLibrary` / `Program Files (x86)\Steam` paths). Close the
+  game first — STS2 locks the loaded DLL. Override with
+  `/p:Sts2Path="C:\path\to\Slay the Spire 2"` if autodetection misses.
 - `MegaCrit.Sts2.Core.Hooks.Hook` is a static class with ~90 dispatch points
   (`AfterDamageGiven`, `AfterCombatEnd`, `AfterCombatVictory`,
   `AfterRewardTaken`, `AfterModifyingCardRewardOptions`, etc.) — this is the
