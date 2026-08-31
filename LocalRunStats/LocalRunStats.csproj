@@ -4,16 +4,37 @@
     <EnableDynamicLoading>true</EnableDynamicLoading>
     <RootNamespace>LocalRunStats</RootNamespace>
     <AssemblyName>local-run-stats</AssemblyName>
+    <Sts2Path Condition="'$(Sts2Path)' == '' and Exists('D:\SteamLibrary\steamapps\common\Slay the Spire 2')">D:\SteamLibrary\steamapps\common\Slay the Spire 2</Sts2Path>
+    <Sts2Path Condition="'$(Sts2Path)' == '' and Exists('C:\Program Files (x86)\Steam\steamapps\common\Slay the Spire 2')">C:\Program Files (x86)\Steam\steamapps\common\Slay the Spire 2</Sts2Path>
+    <Sts2DataDir Condition="'$(Sts2DataDir)' == '' and '$(Sts2Path)' != ''">$(Sts2Path)\data_sts2_windows_x86_64</Sts2DataDir>
+    <Sts2Dll Condition="'$(Sts2Dll)' == '' and Exists('$(Sts2DataDir)\sts2.dll')">$(Sts2DataDir)\sts2.dll</Sts2Dll>
+    <Sts2Dll Condition="'$(Sts2Dll)' == ''">$(MSBuildProjectDirectory)\sts2.dll</Sts2Dll>
+    <HarmonyDll Condition="'$(HarmonyDll)' == '' and Exists('$(Sts2DataDir)\0Harmony.dll')">$(Sts2DataDir)\0Harmony.dll</HarmonyDll>
+    <HarmonyDll Condition="'$(HarmonyDll)' == ''">$(MSBuildProjectDirectory)\0Harmony.dll</HarmonyDll>
+    <ModInstallDir Condition="'$(ModInstallDir)' == '' and '$(Sts2Path)' != ''">$(Sts2Path)\mods\LocalRunStats</ModInstallDir>
   </PropertyGroup>
+
+  <Target Name="ValidateGameReferences" BeforeTargets="ResolveReferences">
+    <Error Condition="!Exists('$(Sts2Dll)')"
+           Text="Need sts2.dll. Set Sts2Path to your Slay the Spire 2 install, or copy sts2.dll and 0Harmony.dll next to this csproj." />
+  </Target>
 
   <ItemGroup>
     <Reference Include="sts2">
-      <HintPath>sts2.dll</HintPath>
+      <HintPath>$(Sts2Dll)</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="0Harmony">
-      <HintPath>0Harmony.dll</HintPath>
+      <HintPath>$(HarmonyDll)</HintPath>
       <Private>false</Private>
     </Reference>
   </ItemGroup>
+
+  <Target Name="InstallToGame" AfterTargets="Build" Condition="'$(ModInstallDir)' != ''">
+    <MakeDir Directories="$(ModInstallDir)" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFiles="$(ModInstallDir)\$(TargetFileName)" />
+    <Copy SourceFiles="$(MSBuildProjectDirectory)\LocalRunStats.json"
+          DestinationFiles="$(ModInstallDir)\LocalRunStats.json" />
+    <Message Importance="high" Text="Installed $(TargetFileName) to $(ModInstallDir)" />
+  </Target>
 </Project>
