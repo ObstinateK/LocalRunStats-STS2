@@ -17,6 +17,13 @@ namespace LocalRunStats;
 // no simple "enumerate every player in this run" access from here.
 public sealed partial class CombatDamageHud : Control
 {
+    // Tuned live via the (now-removed) HudTuningPanel slider tool; locked in
+    // 2026-08-31.
+    private const float MarginRight = 189f;
+    private const float MarginTop = 93f;
+    private const float PanelWidth = 300f;
+    private const float PanelHeight = 308f;
+
     private static CombatDamageHud _instance;
 
     private RichTextLabel _label;
@@ -33,7 +40,6 @@ public sealed partial class CombatDamageHud : Control
         TopLevel = true;
         ZIndex = 100;
         ApplyGeometry();
-        HudTuning.Changed += ApplyGeometry;
 
         _label = new RichTextLabel
         {
@@ -71,7 +77,6 @@ public sealed partial class CombatDamageHud : Control
     public override void _ExitTree()
     {
         if (_instance == this) _instance = null;
-        HudTuning.Changed -= ApplyGeometry;
     }
 
     public static void RefreshAll()
@@ -82,8 +87,8 @@ public sealed partial class CombatDamageHud : Control
     private void ApplyGeometry()
     {
         var viewportSize = GetViewport().GetVisibleRect().Size;
-        Position = new Vector2(viewportSize.X - HudTuning.Width - HudTuning.MarginRight, HudTuning.MarginTop);
-        Size = new Vector2(HudTuning.Width, HudTuning.Height);
+        Position = new Vector2(viewportSize.X - PanelWidth - MarginRight, MarginTop);
+        Size = new Vector2(PanelWidth, PanelHeight);
         CustomMinimumSize = Size;
     }
 

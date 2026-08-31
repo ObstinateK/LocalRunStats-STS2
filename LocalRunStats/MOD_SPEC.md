@@ -202,8 +202,11 @@ specific deck (negative Synergy), or vice versa.
         a separate act-filter button row (All/A1/A2/...) as the orthogonal
         way to narrow by act, built dynamically from `PlayerStatsLog.GetAvailableActs()`.
       - Graph panel position/size locked at the tuned 820x680 centered
-        default; its sliders removed from `HudTuningPanel` (Damage HUD
-        sliders still active).
+        default (now a `const` in `StatsGraphOverlay`).
+      - Damage HUD position/size locked in 2026-08-31 at
+        MarginRight=189 MarginTop=93 Width=300 Height=308 (now `const` in
+        `CombatDamageHud`). Both panels are now fully tuned — `HudTuning.cs`
+        and `HudTuningPanel.cs` (the dev-only slider tool) were deleted.
 
 ### Known limitation: `OnMetricsUpload` gating
 

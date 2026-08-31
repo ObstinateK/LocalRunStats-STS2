@@ -13,6 +13,10 @@ namespace LocalRunStats;
 // while open.
 public sealed partial class StatsGraphOverlay : Control
 {
+    // Locked in 2026-08-29 (centered default, never actually re-tuned).
+    private const float GraphWidth = 820f;
+    private const float GraphHeight = 680f;
+
     private static StatsGraphOverlay _instance;
 
     private bool _perStage = true;
@@ -78,7 +82,6 @@ public sealed partial class StatsGraphOverlay : Control
         AddChild(_goldChart);
 
         ApplyGeometry();
-        HudTuning.Changed += ApplyGeometry;
 
         _instance = this;
         UpdateModeButtonStyles();
@@ -88,16 +91,15 @@ public sealed partial class StatsGraphOverlay : Control
     public override void _ExitTree()
     {
         if (_instance == this) _instance = null;
-        HudTuning.Changed -= ApplyGeometry;
     }
 
     private void ApplyGeometry()
     {
         var viewportSize = GetViewport().GetVisibleRect().Size;
-        var w = HudTuning.GraphWidth;
-        var h = HudTuning.GraphHeight;
-        var x = HudTuning.GraphX >= 0f ? HudTuning.GraphX : (viewportSize.X - w) / 2f;
-        var y = HudTuning.GraphY >= 0f ? HudTuning.GraphY : (viewportSize.Y - h) / 2f;
+        var w = GraphWidth;
+        var h = GraphHeight;
+        var x = (viewportSize.X - w) / 2f;
+        var y = (viewportSize.Y - h) / 2f;
         Position = new Vector2(x, y);
         Size = new Vector2(w, h);
 

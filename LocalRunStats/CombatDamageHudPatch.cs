@@ -23,7 +23,6 @@ internal static class CombatDamageHudPatch
             RunContext.CurrentRunStartUtc = System.DateTime.UtcNow;
             var hud = new CombatDamageHud { Name = NodeName };
             __instance.AddChild(hud);
-            HudTuningPanel.EnsureAttached(__instance);
             StatsGraphOverlay.EnsureAttached(__instance);
         }
         catch (System.Exception ex)
