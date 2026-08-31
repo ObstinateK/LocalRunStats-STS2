@@ -1,0 +1,9 @@
+.godot/
+bin/
+obj/
+
+# Reference copies of the game's own DLLs (see MOD_SPEC.md hard rules) —
+# not ours to redistribute, and not needed to build against once a
+# checkout has them locally next to the game.
+sts2.dll
+0Harmony.dll

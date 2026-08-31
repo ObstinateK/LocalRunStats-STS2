@@ -1,0 +1,12 @@
+{
+  "id": "local-run-stats",
+  "name": "Local Run Stats",
+  "author": "samvith",
+  "description": "Local-only run statistics tracking (no web backend).",
+  "version": "0.0.1",
+  "has_dll": true,
+  "has_pck": false,
+  "affects_gameplay": false,
+  "min_game_version": "0.107.1",
+  "dependencies": []
+}
