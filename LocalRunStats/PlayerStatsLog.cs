@@ -66,6 +66,51 @@ public static class PlayerStatsLog
         public Dictionary<string, List<float>> SeriesByPlayer { get; set; } = new();
     }
 
+    // Every chart/table below used to group and key its per-player series
+    // directly by CharacterName (a string). That silently broke in co-op
+    // whenever two players picked the SAME character: e.g. `fight.FirstOrDefault(r
+    // => r.CharacterName == "Silent")` would only ever find ONE of the two
+    // Silents' rows per fight, so the second player's data got dropped, not
+    // just mislabeled. Every record type already carries PlayerNetId (the
+    // true unique identity), so the fix is to key everything by NetId
+    // internally and only use CharacterName for display — resolved through
+    // this helper into "Silent 1"/"Silent 2" when (and only when) more than
+    // one distinct NetId in the given data shares the same raw character
+    // name; a lone player keeps their plain name. Numbering follows
+    // first-occurrence order in `players`, so it's stable for one Build call
+    // but is recomputed fresh (never persisted) each time from whatever data
+    // is currently available — e.g. before a second same-character player has
+    // logged anything, the first one is shown unsuffixed, then both gain
+    // numbers once there's data to detect the collision.
+    public static Dictionary<ulong, string> DisambiguateCharacterNames(IEnumerable<(ulong NetId, string CharacterName)> players)
+    {
+        var distinct = new List<(ulong NetId, string CharacterName)>();
+        var seenNetIds = new HashSet<ulong>();
+        foreach (var p in players)
+        {
+            if (seenNetIds.Add(p.NetId)) distinct.Add(p);
+        }
+
+        var countByName = distinct.GroupBy(p => p.CharacterName).ToDictionary(g => g.Key, g => g.Count());
+        var ordinalByName = new Dictionary<string, int>();
+        var result = new Dictionary<ulong, string>();
+        foreach (var p in distinct)
+        {
+            if (countByName[p.CharacterName] <= 1)
+            {
+                result[p.NetId] = p.CharacterName;
+            }
+            else
+            {
+                ordinalByName.TryGetValue(p.CharacterName, out var n);
+                n++;
+                ordinalByName[p.CharacterName] = n;
+                result[p.NetId] = $"{p.CharacterName} {n}";
+            }
+        }
+        return result;
+    }
+
     // Distinct act indices (0-based) present in this run's data so far, for
     // populating the act-filter buttons. Union of damage + gold logs.
     public static List<int> GetAvailableActs()
@@ -103,8 +148,9 @@ public static class PlayerStatsLog
         var data = new ChartData();
         if (records.Count == 0) return data;
 
-        var playerNames = records.Select(r => r.CharacterName).Distinct().ToList();
-        foreach (var name in playerNames) data.SeriesByPlayer[name] = new List<float>();
+        var displayNames = DisambiguateCharacterNames(records.Select(r => (r.PlayerNetId, r.CharacterName)));
+        var netIds = displayNames.Keys.ToList();
+        foreach (var netId in netIds) data.SeriesByPlayer[displayNames[netId]] = new List<float>();
 
         var fights = records.GroupBy(r => r.Timestamp).OrderBy(g => g.Key).ToList();
         var stageIndex = 0;
@@ -112,10 +158,10 @@ public static class PlayerStatsLog
         {
             stageIndex++;
             data.XLabels.Add(ShortenEncounterId(fight.First().EncounterId, stageIndex));
-            foreach (var name in playerNames)
+            foreach (var netId in netIds)
             {
-                var record = fight.FirstOrDefault(r => r.CharacterName == name);
-                data.SeriesByPlayer[name].Add(record != null ? selector(record) : 0f);
+                var record = fight.FirstOrDefault(r => r.PlayerNetId == netId);
+                data.SeriesByPlayer[displayNames[netId]].Add(record != null ? selector(record) : 0f);
             }
         }
         return data;
@@ -133,9 +179,10 @@ public static class PlayerStatsLog
         var data = new ChartData();
         if (records.Count == 0) return data;
 
-        var playerNames = records.Select(r => r.CharacterName).Distinct().ToList();
-        var runningTotals = playerNames.ToDictionary(n => n, _ => 0f);
-        foreach (var name in playerNames) data.SeriesByPlayer[name] = new List<float>();
+        var displayNames = DisambiguateCharacterNames(records.Select(r => (r.PlayerNetId, r.CharacterName)));
+        var netIds = displayNames.Keys.ToList();
+        var runningTotals = netIds.ToDictionary(id => id, _ => 0f);
+        foreach (var netId in netIds) data.SeriesByPlayer[displayNames[netId]] = new List<float>();
 
         var fights = records.GroupBy(r => r.Timestamp).OrderBy(g => g.Key).ToList();
         var fightIndex = 0;
@@ -143,16 +190,16 @@ public static class PlayerStatsLog
         {
             fightIndex++;
             data.XLabels.Add(fightIndex.ToString());
-            foreach (var name in playerNames)
+            foreach (var netId in netIds)
             {
-                var record = fight.FirstOrDefault(r => r.CharacterName == name);
+                var record = fight.FirstOrDefault(r => r.PlayerNetId == netId);
                 if (record != null)
                 {
-                    runningTotals[name] += selector(record);
+                    runningTotals[netId] += selector(record);
                 }
                 // Player had no record for this fight (e.g. joined mid-run) ->
                 // carry their running total forward unchanged.
-                data.SeriesByPlayer[name].Add(runningTotals[name]);
+                data.SeriesByPlayer[displayNames[netId]].Add(runningTotals[netId]);
             }
         }
         return data;
@@ -166,43 +213,50 @@ public static class PlayerStatsLog
         if (records.Count == 0) return data;
 
         var ordered = records.OrderBy(r => r.Timestamp).ToList();
+        var displayNames = DisambiguateCharacterNames(ordered.Select(r => (r.PlayerNetId, r.CharacterName)));
 
         if (perStage)
         {
             // One bar per gold-gain event = the amount gained at that specific
             // event (delta from that player's previous known total), not the
-            // running total — mirrors damage's per-fight raw value.
-            var lastKnown = new Dictionary<string, float>();
+            // running total — mirrors damage's per-fight raw value. Includes
+            // the baseline row RunContext.EnsureBaselineGoldCaptured writes at
+            // run start, so a player's very first bar is their starting gold,
+            // not their first real pickup on top of an assumed-zero balance.
+            var lastKnown = new Dictionary<ulong, float>();
             var index = 0;
             foreach (var r in ordered)
             {
                 index++;
                 data.XLabels.Add(index.ToString());
-                lastKnown.TryGetValue(r.CharacterName, out var previous);
+                lastKnown.TryGetValue(r.PlayerNetId, out var previous);
                 var delta = System.Math.Max(0f, r.CurrentGold - previous);
-                lastKnown[r.CharacterName] = r.CurrentGold;
+                lastKnown[r.PlayerNetId] = r.CurrentGold;
 
-                foreach (var name in lastKnown.Keys.ToList())
+                foreach (var netId in lastKnown.Keys.ToList())
                 {
+                    var name = displayNames[netId];
                     if (!data.SeriesByPlayer.TryGetValue(name, out var series))
                     {
                         series = new List<float>(new float[data.XLabels.Count - 1]);
                         data.SeriesByPlayer[name] = series;
                     }
-                    series.Add(name == r.CharacterName ? delta : 0f);
+                    series.Add(netId == r.PlayerNetId ? delta : 0f);
                 }
             }
         }
         else
         {
-            // Same fix as BuildCumulativeDamage: align by actual chronological
-            // moment (grouped by Timestamp), not by each player's own event
-            // index — two players' gold events are independent, so "player A's
-            // 3rd pickup" and "player B's 3rd pickup" are not the same moment
-            // and shouldn't share an x-axis slot.
-            var playerNames = ordered.Select(r => r.CharacterName).Distinct().ToList();
-            var lastKnown = playerNames.ToDictionary(n => n, _ => 0f);
-            foreach (var name in playerNames) data.SeriesByPlayer[name] = new List<float>();
+            // Same fix as BuildCumulativeFightMetric: align by actual
+            // chronological moment (grouped by Timestamp), not by each
+            // player's own event index — two players' gold events are
+            // independent, so "player A's 3rd pickup" and "player B's 3rd
+            // pickup" are not the same moment and shouldn't share an x-axis
+            // slot. The baseline row (see above) means every player's very
+            // first moment is their starting gold, not 0.
+            var netIds = displayNames.Keys.ToList();
+            var lastKnown = netIds.ToDictionary(id => id, _ => 0f);
+            foreach (var netId in netIds) data.SeriesByPlayer[displayNames[netId]] = new List<float>();
 
             var moments = ordered.GroupBy(r => r.Timestamp).OrderBy(g => g.Key).ToList();
             var index = 0;
@@ -210,11 +264,11 @@ public static class PlayerStatsLog
             {
                 index++;
                 data.XLabels.Add(index.ToString());
-                foreach (var name in playerNames)
+                foreach (var netId in netIds)
                 {
-                    var record = moment.FirstOrDefault(r => r.CharacterName == name);
-                    if (record != null) lastKnown[name] = record.CurrentGold;
-                    data.SeriesByPlayer[name].Add(lastKnown[name]);
+                    var record = moment.FirstOrDefault(r => r.PlayerNetId == netId);
+                    if (record != null) lastKnown[netId] = record.CurrentGold;
+                    data.SeriesByPlayer[displayNames[netId]].Add(lastKnown[netId]);
                 }
             }
         }
@@ -223,28 +277,19 @@ public static class PlayerStatsLog
 
     // Per-player breakdown of which cards were played and how many times,
     // for the whole run so far (no act filter — "how many times has this
-    // card been played" is a run-wide question, not a per-act one), followed
-    // by the same breakdown split out per individual fight. Rendered as
-    // BBCode text (by CardPlayCountsPanel) rather than a chart: card names
+    // card been played" is a run-wide question, not a per-act one). Rendered
+    // as BBCode text (by CardPlayCountsPanel) rather than a chart: card names
     // have no natural x-axis ordering the way fights/turns do.
-    public static string BuildCardPlayCountsBbcode()
-    {
-        var sb = new StringBuilder();
-        sb.Append(BuildOverallCardPlayCounts());
-        sb.Append("\n[b]--- By Fight ---[/b]\n");
-        sb.Append(BuildCardPlayCountsByFight());
-        return sb.ToString();
-    }
-
-    private static string BuildOverallCardPlayCounts()
+    public static string BuildOverallCardPlayCounts()
     {
         var records = FilterToCurrentRun(ReadAllLines<CardPlayRecord>("card_plays.jsonl"), r => r.Timestamp);
         if (records.Count == 0) return "(no cards played yet)";
 
+        var displayNames = DisambiguateCharacterNames(records.Select(r => (r.PlayerNetId, r.CharacterName)));
         var sb = new StringBuilder();
-        foreach (var playerGroup in records.GroupBy(r => r.CharacterName))
+        foreach (var playerGroup in records.GroupBy(r => r.PlayerNetId))
         {
-            sb.Append($"[b]{Escape(playerGroup.Key)}[/b]\n[table=2]");
+            sb.Append($"[b]{Escape(displayNames[playerGroup.Key])}[/b]\n[table=2]");
             var counts = playerGroup.GroupBy(r => r.CardName)
                 .Select(g => (Name: g.Key, Count: g.Count()))
                 .OrderByDescending(c => c.Count)
@@ -258,32 +303,39 @@ public static class PlayerStatsLog
         return sb.ToString();
     }
 
-    // One block per fight (grouped by the shared Timestamp all players'
-    // records for that fight were written with, same convention as
-    // BuildPerStageFightMetric), each with its own per-player card table.
-    private static string BuildCardPlayCountsByFight()
+    // One self-contained BBCode block per fight (grouped by the shared
+    // Timestamp all players' records for that fight were written with, same
+    // convention as BuildPerStageFightMetric), each with its own per-player
+    // card table. Returned as a list, one entry per fight, rather than one
+    // combined string — CardPlayCountsPanel lays these out in an
+    // HFlowContainer (fights side-by-side, wrapping to a new row once a row
+    // is full) instead of one long vertical list.
+    public static List<string> BuildCardPlayCountsByFightBlocks()
     {
         var records = FilterToCurrentRun(ReadAllLines<CardPlayCountRecord>("card_play_fights.jsonl"), r => r.Timestamp);
-        if (records.Count == 0) return "(no fights yet)";
+        if (records.Count == 0) return new List<string>();
 
-        var sb = new StringBuilder();
+        var displayNames = DisambiguateCharacterNames(records.Select(r => (r.PlayerNetId, r.CharacterName)));
+        var blocks = new List<string>();
         var fights = records.GroupBy(r => r.Timestamp).OrderBy(g => g.Key).ToList();
         var stageIndex = 0;
         foreach (var fight in fights)
         {
             stageIndex++;
+            var sb = new StringBuilder();
             sb.Append($"[b]Fight {stageIndex}: {Escape(ShortenEncounterId(fight.First().EncounterId, stageIndex))}[/b]\n");
-            foreach (var playerGroup in fight.GroupBy(r => r.CharacterName))
+            foreach (var playerGroup in fight.GroupBy(r => r.PlayerNetId))
             {
-                sb.Append($"{Escape(playerGroup.Key)}\n[table=2]");
+                sb.Append($"{Escape(displayNames[playerGroup.Key])}\n[table=2]");
                 foreach (var row in playerGroup.OrderByDescending(r => r.Count).ThenBy(r => r.CardName, StringComparer.Ordinal))
                 {
                     sb.Append($"[cell]{Escape(row.CardName)}[/cell][cell]x{row.Count}[/cell]");
                 }
                 sb.Append("[/table]\n");
             }
+            blocks.Add(sb.ToString());
         }
-        return sb.ToString();
+        return blocks;
     }
 
     private static string Escape(string s) => s.Replace("[", "[lb]");

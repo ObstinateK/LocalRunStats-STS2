@@ -33,7 +33,11 @@ public sealed class RunStateListener : SingletonModel
     // see MOD_SPEC.md).
     public override System.Threading.Tasks.Task AfterRewardTaken(Player player, Reward reward)
     {
-        if (player != null) GameContext.LocalPlayer = player;
+        if (player != null)
+        {
+            GameContext.LocalPlayer = player;
+            RunContext.EnsureBaselineGoldCaptured(player);
+        }
         return System.Threading.Tasks.Task.CompletedTask;
     }
 

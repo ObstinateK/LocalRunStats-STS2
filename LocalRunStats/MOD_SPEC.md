@@ -476,14 +476,167 @@ poisoned can't get misattributed to whoever applied that poison. Same
 multi-source caveat as Doom: if two co-op players poison the same enemy,
 `Applier` only reflects the most recent stacker.
 
-### Not yet verified live (2026-08-31 batch)
+### Fixed 2026-08-31: gold chart looked desynced because starting gold was invisible
+
+Reported live: a co-op Gold chart showed The Necrobinder's line already
+elevated from the first point while The Silent's stayed flat near 0 until
+partway through, then jumped sharply — looked desynced even though nothing
+was actually wrong with the event ordering (that class of bug was already
+fixed earlier — see "Fix cumulative chart desync in co-op" below). Root
+cause: `gold_log.jsonl` only ever got a row from `GoldTracker.AfterGoldGained`
+— every player starts a run with real gold already in hand (matches vanilla
+STS's 99/100 starting gold), but that pre-`AfterGoldGained` balance was never
+recorded anywhere, so each player's line effectively started from an assumed
+0 until their own first gold-gain event fired. In co-op the two players'
+first gains rarely land on the same fight, so one player's baseline showed up
+"late" relative to the other, reading as a desync.
+Fixed with `RunContext.EnsureBaselineGoldCaptured(Player)`: writes one
+GoldRecord per player (guarded by a per-run `HashSet<ulong>` so it only ever
+fires once per player), stamped with `RunContext.CurrentRunStartUtc` — always
+earlier than any real event, so it sorts first regardless of which hook
+happens to capture it. Called from three points, earliest-first:
+`RunStateListener.AfterRewardTaken` (the very first screen of any run —
+Neow's/the ancient blessing choice — fires before combat even exists, so
+`player.Gold` there should still be the untouched starting amount),
+`CombatStatsListener.AfterPlayerTurnStart` (fallback — first turn of the
+first fight, before any card is played), and `GoldTracker.AfterGoldGained`
+itself (last-resort fallback, so at least *something* gets recorded even if
+neither earlier hook fired first for some reason — though by definition
+that fallback's value is already post-gain, not pristine).
+`RunContext` also gained `ResetForNewRun()` (clears the per-run HashSet
+alongside setting `CurrentRunStartUtc`), replacing the old direct field
+assignment in `CombatDamageHudPatch`.
+
+### Fixed 2026-08-31: two players on the same character silently collided, not just mislabeled
+
+Reported as a labeling request ("if there's multiples of the same character,
+add a number after — Silent 1, Silent 2") but turned out to be a real
+data-correctness bug once traced through: `PlayerStatsLog`'s chart/table
+builders grouped and keyed every per-player series by `CharacterName`
+(a string) instead of `PlayerNetId` (every record type already carries
+both). Two players both on The Silent would collide — e.g.
+`fight.FirstOrDefault(r => r.CharacterName == "Silent")` only ever returns
+ONE of the two Silents' rows per fight, so the second player's data was
+silently dropped from that fight's bar/point entirely, not just displayed
+under a shared label. `CombatDamageHud`'s live table was safe from the
+data-loss (it already reads `CombatStatsListener.DamageByPlayer`, a
+`Dictionary<ulong, PlayerDamageTracker>` genuinely keyed by NetId), but two
+same-character rows there would still have shown identical, ambiguous
+labels.
+Fixed by adding `PlayerDamageTracker.NetId` (set once in `GetOrCreateTracker`)
+and a shared `PlayerStatsLog.DisambiguateCharacterNames(IEnumerable<(ulong
+NetId, string CharacterName)>)` helper: collapses to one entry per distinct
+NetId (first occurrence), counts how many distinct NetIds share each raw
+CharacterName, and only appends " 1"/" 2"/... for names shared by more than
+one — a lone player keeps their plain name. Every `PlayerStatsLog` Build*
+method (`BuildPerStageFightMetric`, `BuildCumulativeFightMetric`,
+`BuildGoldChartData`, `BuildOverallCardPlayCounts`, `BuildCardPlayCountsByFight`)
+now groups/keys by `PlayerNetId` internally and only resolves through this
+helper for display strings (chart legend keys, BBCode table headers).
+`CombatDamageHud.AppendTable` does the same for its name column. Numbering
+is recomputed fresh from whatever data is available each time it's called
+(never persisted) — so early in a run, before a second same-character player
+has logged anything, the first one may briefly show unsuffixed, then both
+gain numbers once there's enough data to detect the collision. That's
+accepted as fine, same "best-effort, self-correcting" spirit as the
+Doom/poison Applier approximations above.
+
+### Added 2026-08-31: auto-install on build
+
+`Sid-creates` (co-op collaborator) contributed `pull-and-install.ps1` plus an
+`InstallToGame` MSBuild target (`AfterTargets="Build"`) that copies the built
+DLL + manifest straight into `<Sts2Path>\mods\LocalRunStats` — no more manual
+copy after every build. `Sts2Path` auto-detection originally only covered
+`D:\SteamLibrary\...` and `C:\Program Files (x86)\Steam\...`, missing this
+project's actual dev machine (`C:\SteamLibrary\...`); expanded the candidate
+list to also cover `C:\SteamLibrary`, `D:`/`E:`/`F:` drives with either
+`SteamLibrary` or `Steam` as the folder name, and `C:\Program Files\Steam`
+(non-x86). Override with `/p:Sts2Path="..."` if autodetection ever misses.
+Merged via a normal `git fetch` + `git merge` after a push conflict (the PR
+landed on GitHub via `gh`/a web PR while this session's local `master` had
+already diverged) — no conflicts, since the PR's `MOD_SPEC.md` edit and this
+session's edits landed in different, non-overlapping sections of the file.
+
+### Fixed 2026-08-31: Doom-kill damage was the enemy's full MaxHp, not its remaining HP
+
+Reported live: "right now its adding the total health of the enemy to the
+damage dealt." Correct — the original approximation used `creature.MaxHp` for
+every Doom kill, which double-counts: an enemy already whittled down by
+normal attacks/poison before Doom finishes it off already had that damage
+counted once via those hits' own `AfterDamageGiven` calls, then got its FULL
+max health added a second time here.
+The fix needs the enemy's HP immediately before the kill, but that can't be
+read at `AfterDiedToDoom` time (or even in the `BeforeDeath` hook added
+earlier for the Applier fix) — re-decompiling
+`CreatureCmd.KillWithoutCheckingWinCondition` confirmed the order is: capture
+`currentHp` into a local, drain it to 0 via `LoseHpInternal`, fire
+`Hook.AfterCurrentHpChanged`, THEN fire `Hook.BeforeDeath` — so by the time
+any of our hooks see the creature, `CurrentHp` already reads 0. Fixed instead
+by opportunistically caching `target.CurrentHp` in `_lastKnownHp` every time
+`AfterDamageGiven` fires (which already covers every real hit, including
+poison ticks, since those go through the same `CreatureCmd.Damage`/hook
+path) — so by the time Doom triggers, the last cached value is exactly the
+creature's HP right before the kill, with no HP-changing event possible in
+between under normal circumstances. `AfterDiedToDoom` now uses this cache
+(falling back to `MaxHp` only if the creature took no tracked damage at all
+this fight, i.e. it's reasonable to assume it was still full) and skips
+crediting anything if the cached HP is 0 (already fully accounted for via
+normal damage). Caveat noted in code: a heal landing between the last hit and
+the Doom kill would make the cached value stale (an undercount, not an
+overcount) — considered an acceptable edge case, same "best-effort" spirit as
+the Applier lookups.
+
+### Changed 2026-08-31: per-fight card counts now flow in a grid, not a long list
+
+The "By Fight" card-play breakdown (added earlier this session) was one long
+vertical list of `[b]Fight N[/b]` blocks — changed on request to lay fights
+out side-by-side, wrapping to a new row once a row runs out of width, "like a
+table." BBCode's `[table=N]` forces a fixed column count, not width-based
+wrapping, so this isn't rendered as BBCode text at all: `CardPlayCountsPanel`
+was restructured around a `ScrollContainer` > `VBoxContainer` containing the
+overall-totals `RichTextLabel` (unchanged) followed by an `HFlowContainer` —
+Godot's native flex-wrap container — holding one small `RichTextLabel` child
+per fight (`CustomMinimumSize` ~150px wide), which Godot lays out and wraps
+automatically. `PlayerStatsLog.BuildCardPlayCountsByFightBlocks()` replaces
+the old single-string `BuildCardPlayCountsByFight()`, returning
+`List<string>` (one self-contained BBCode block per fight) instead of one
+combined string, so the panel can create one widget per block rather than
+concatenating text.
+
+### Fixed 2026-08-31: HFlowContainer still rendered as a vertical list
+
+Reported live: "the card play layout is still one long list" — the
+`HFlowContainer` change above compiled and ran, but visually did nothing.
+Root cause: a `ScrollContainer`'s default `HorizontalScrollMode` is `Auto`,
+which lets its child grow as wide as it wants (scrolling horizontally to
+match) instead of clamping the child's width to the ScrollContainer's own
+viewport. With no fixed width to wrap within, a `FlowContainer`'s minimum
+size collapses to fit just its single widest child — so `_fightFlow` wrapped
+after every one fight block, which looks identical to a plain vertical list.
+Fixed by setting `HorizontalScrollMode = ScrollContainer.ScrollMode.Disabled`
+(clamps content width to the viewport — the standard Godot technique for
+"vertical-scroll-only content that wraps to available width") plus
+`SizeFlagsHorizontal = Control.SizeFlags.ExpandFill` on both the inner
+`VBoxContainer` and the `HFlowContainer` itself, so each actually claims the
+full available width instead of shrinking to its minimum. Lesson: a
+FlowContainer needs an ANCESTOR that assigns it a real width to wrap
+against — nesting it inside a ScrollContainer alone isn't enough without also
+disabling that ScrollContainer's horizontal scroll.
+
+### Not yet verified live (2026-08-31 batch, continued)
 
 None of the following have been tested in-game yet as of this note — all
-built and deployed pending the user closing/reopening the game:
+built and deployed (auto-install confirmed the DLL landed) pending the next
+run:
 - Chart x-axis label centering fix.
-- Doom-kill Applier attribution via the new `BeforeDeath` cache.
+- Doom-kill Applier attribution via the `BeforeDeath` cache, AND the
+  MaxHp -> `_lastKnownHp` sizing fix on top of it (both landed before either
+  was tested live).
 - Osty dealt/taken asymmetric attribution (including the "Unleash"-style
   card-dealt-through-Osty path).
-- Per-fight card play breakdown (`card_play_fights.jsonl` + the "By Fight"
-  BBCode section).
-- Poison-damage-dealt Applier fix (just added, above).
+- Per-fight card play breakdown, now as a wrapping HFlowContainer grid
+  instead of a long list.
+- Poison-damage-dealt Applier fix.
+- Gold chart starting-balance baseline fix.
+- Same-character NetId-based disambiguation ("Silent 1"/"Silent 2") across
+  all charts, card-count panels, and the live Damage HUD table.

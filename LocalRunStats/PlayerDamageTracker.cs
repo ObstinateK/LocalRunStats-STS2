@@ -9,6 +9,7 @@ namespace LocalRunStats;
 // and Taken are tracked in parallel with the same shape.
 public sealed class PlayerDamageTracker
 {
+    public ulong NetId;
     public string CharacterName = "?";
 
     public int CurrentFightDealt;

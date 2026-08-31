@@ -20,7 +20,7 @@ internal static class CombatDamageHudPatch
             if (__instance.GetNodeOrNull(NodeName) is not null) return;
             Log.Info("[LocalRunStats] NRun._Ready fired, attaching combat damage HUD.");
             CombatStatsListener.Instance.ResetForNewRun();
-            RunContext.CurrentRunStartUtc = System.DateTime.UtcNow;
+            RunContext.ResetForNewRun();
             var hud = new CombatDamageHud { Name = NodeName };
             __instance.AddChild(hud);
             StatsGraphOverlay.EnsureAttached(__instance);

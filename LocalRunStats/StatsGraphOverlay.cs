@@ -228,7 +228,7 @@ public sealed partial class StatsGraphOverlay : Control
         {
             _turnsChart.SetData(PlayerStatsLog.BuildTurnsChartData(_perStage, _actFilter), isLine);
             _cardsChart.SetData(PlayerStatsLog.BuildCardsPlayedChartData(_perStage, _actFilter), isLine);
-            _cardPlayCountsPanel.SetBbcode(PlayerStatsLog.BuildCardPlayCountsBbcode());
+            _cardPlayCountsPanel.SetData(PlayerStatsLog.BuildOverallCardPlayCounts(), PlayerStatsLog.BuildCardPlayCountsByFightBlocks());
         }
     }
 }

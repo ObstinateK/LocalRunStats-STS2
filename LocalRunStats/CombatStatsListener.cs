@@ -52,6 +52,12 @@ public sealed class CombatStatsListener : SingletonModel
     // prevented death (Fairy in a Bottle, etc.) can't leak a stale entry.
     private readonly Dictionary<Creature, Creature> _pendingDoomApplier = new();
 
+    // Last-observed CurrentHp per creature, refreshed on every real damage hit
+    // (see AfterDamageGiven). Used to size a Doom kill's "damage dealt" value
+    // accurately — see AfterDiedToDoom for why creature.CurrentHp/MaxHp can't
+    // be read directly at that point.
+    private readonly Dictionary<Creature, int> _lastKnownHp = new();
+
     // Per-fight card play counts, keyed by Player.NetId then card name.
     // Folded into card_play_fights.jsonl at AfterCombatEnd (one row per
     // player-card pair, mirroring WritePerPlayerRecords) so the graph
@@ -74,6 +80,7 @@ public sealed class CombatStatsListener : SingletonModel
         _damageByPlayer.Clear();
         _pendingDoomApplier.Clear();
         _cardPlayCountsThisFight.Clear();
+        _lastKnownHp.Clear();
     }
 
     // Attribution is deliberately ASYMMETRIC between dealing and taking:
@@ -115,6 +122,12 @@ public sealed class CombatStatsListener : SingletonModel
     // so this doesn't happen again.
     public override Task AfterDamageGiven(PlayerChoiceContext context, Creature dealer, DamageResult damageResult, ValueProp props, Creature target, CardModel card)
     {
+        // Track the target's CurrentHp after every real hit lands — see
+        // AfterDiedToDoom, which needs to know a creature's HP immediately
+        // before it dies to Doom, at a point where creature.CurrentHp has
+        // already been zeroed out by the game itself.
+        if (target != null) _lastKnownHp[target] = target.CurrentHp;
+
         // Poison ticks pass dealer=null — confirmed by decompiling
         // PoisonPower.AfterSideTurnStart: `CreatureCmd.Damage(ctx, base.Owner,
         // base.Amount, ..., dealer: null, cardSource: null)`. A poison tick is
@@ -171,7 +184,21 @@ public sealed class CombatStatsListener : SingletonModel
     // Poison, Thorns, self-damage cards, etc. all already go through — so
     // those are already counted with no changes needed). Doom is an instant
     // execute with no damage number attached to it at all, so this
-    // approximates "how much this execute was worth" as the creature's MaxHp.
+    // approximates "how much this execute was worth" as the creature's
+    // remaining HP right before the kill (via _lastKnownHp — see
+    // AfterDamageGiven), NOT its MaxHp. Using MaxHp was a real overcounting
+    // bug: a creature already whittled down by normal attacks/poison before
+    // Doom finishes it off would have that already-counted damage added a
+    // SECOND time (once via the original hits' AfterDamageGiven, again here
+    // via the full MaxHp). creature.CurrentHp/MaxHp can't be read directly at
+    // this point either way — confirmed by decompiling
+    // CreatureCmd.KillWithoutCheckingWinCondition: it drains CurrentHp to 0
+    // via LoseHpInternal BEFORE Hook.BeforeDeath (and therefore well before
+    // Hook.AfterDiedToDoom) ever fires, so by the time any of our hooks see
+    // this creature, CurrentHp already reads 0. Falls back to MaxHp only if
+    // the creature never took any tracked damage this fight (e.g. its Doom
+    // stacks alone reached the kill threshold with no other hits landing),
+    // in which case it's reasonable to assume it was still at full health.
     // Multiplayer attribution for the *dealt* side is also an approximation:
     // Doom doesn't carry a "who applied it" reference the way an attack's
     // dealer/target does, so an enemy dying to Doom is credited to
@@ -182,9 +209,10 @@ public sealed class CombatStatsListener : SingletonModel
         foreach (var creature in creatures)
         {
             if (creature == null) continue;
-            var amount = creature.MaxHp;
 
             _pendingDoomApplier.Remove(creature, out var applier);
+            var amount = _lastKnownHp.Remove(creature, out var hp) ? hp : creature.MaxHp;
+            if (amount <= 0) continue; // already fully accounted for via normal damage
 
             // Pets (Osty) are out of scope entirely, same as in
             // AfterDamageGiven — Osty dying to Doom is neither the player
@@ -225,6 +253,7 @@ public sealed class CombatStatsListener : SingletonModel
         if (player != null)
         {
             GameContext.LocalPlayer = player;
+            RunContext.EnsureBaselineGoldCaptured(player);
             GetOrCreateTracker(player).CurrentFightTurns++;
         }
         return Task.CompletedTask;
@@ -263,7 +292,7 @@ public sealed class CombatStatsListener : SingletonModel
     {
         if (!_damageByPlayer.TryGetValue(player.NetId, out var tracker))
         {
-            tracker = new PlayerDamageTracker();
+            tracker = new PlayerDamageTracker { NetId = player.NetId };
             _damageByPlayer[player.NetId] = tracker;
         }
         // Character can only be known once the player has loaded in, but
@@ -297,6 +326,10 @@ public sealed class CombatStatsListener : SingletonModel
             // next fight.
             _pendingDoomApplier.Clear();
             _cardPlayCountsThisFight.Clear();
+            // Creature instances don't outlive their fight, so any entries
+            // here belong to creatures that took damage but survived — drop
+            // them rather than let the dictionary grow unbounded over a run.
+            _lastKnownHp.Clear();
         }
         return Task.CompletedTask;
     }

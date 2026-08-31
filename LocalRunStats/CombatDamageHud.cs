@@ -102,17 +102,22 @@ public sealed partial class CombatDamageHud : Control
         var players = CombatStatsListener.Instance.DamageByPlayer.Values.ToList();
         if (players.Count == 0) return "[b]COMBAT DAMAGE TAKEN[/b]\n(none yet)\n\n[b]COMBAT DAMAGE DEALT[/b]\n(none yet)";
 
+        // Two co-op players on the same character (e.g. both Silent) would
+        // otherwise show two identically-labeled rows — disambiguate into
+        // "Silent 1"/"Silent 2" via NetId, same helper the graph overlay uses.
+        var displayNames = PlayerStatsLog.DisambiguateCharacterNames(players.Select(p => (p.NetId, p.CharacterName)));
+
         var maxActIndex = players.SelectMany(p => p.DealtByActIndex.Keys.Concat(p.TakenByActIndex.Keys)).DefaultIfEmpty(-1).Max();
         var acts = maxActIndex + 1; // count of acts reached so far, ActModel.Index is 0-based -> displayed as A1, A2, ...
 
         var sb = new StringBuilder();
-        AppendTable(sb, "COMBAT DAMAGE TAKEN", players, acts, dealt: false);
+        AppendTable(sb, "COMBAT DAMAGE TAKEN", players, displayNames, acts, dealt: false);
         sb.Append('\n');
-        AppendTable(sb, "COMBAT DAMAGE DEALT", players, acts, dealt: true);
+        AppendTable(sb, "COMBAT DAMAGE DEALT", players, displayNames, acts, dealt: true);
         return sb.ToString();
     }
 
-    private static void AppendTable(StringBuilder sb, string title, System.Collections.Generic.List<PlayerDamageTracker> players, int acts, bool dealt)
+    private static void AppendTable(StringBuilder sb, string title, System.Collections.Generic.List<PlayerDamageTracker> players, System.Collections.Generic.Dictionary<ulong, string> displayNames, int acts, bool dealt)
     {
         var columns = acts + 3; // name, FIGHT, A1..An, sigma
         sb.Append($"[b]{title}[/b]\n");
@@ -128,7 +133,7 @@ public sealed partial class CombatDamageHud : Control
             var byAct = dealt ? p.DealtByActIndex : p.TakenByActIndex;
             var total = dealt ? p.TotalDealt : p.TotalTaken;
 
-            sb.Append($"[cell]{Escape(p.CharacterName)}[/cell]");
+            sb.Append($"[cell]{Escape(displayNames[p.NetId])}[/cell]");
             sb.Append($"[cell]{currentFight}[/cell]");
             for (var a = 0; a < acts; a++)
             {

@@ -23,6 +23,14 @@ public sealed class GoldTracker : SingletonModel
     {
         try
         {
+            // Last-resort fallback: normally RunStateListener.AfterRewardTaken
+            // (or CombatStatsListener.AfterPlayerTurnStart) already captured
+            // this player's starting gold before their first gain, but if
+            // neither fired first for some reason, at least the baseline gets
+            // written (even though by definition it's already post-gain at
+            // this point) rather than never existing at all.
+            RunContext.EnsureBaselineGoldCaptured(player);
+
             var record = new GoldRecord
             {
                 Timestamp = DateTime.UtcNow.ToString("o"),
