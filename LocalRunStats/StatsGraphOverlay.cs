@@ -74,12 +74,11 @@ public sealed partial class StatsGraphOverlay : Control
         _closeButton.Pressed += () => Visible = false;
         AddChild(_closeButton);
 
-        // Local history/*.run files are only written once a run actually
-        // ends (win/death/abandon), so this always opens the run that just
-        // finished — no dedicated "run ended" hook needed. See
-        // RunSummaryReport.
+        // Reads RunManager.Instance.History directly (see RunSummaryReport),
+        // which the game keeps live/up-to-date throughout the run — works
+        // mid-run, not just after it ends.
         _runReportButton = new Button { Text = "Run Report", Size = new Vector2(110f, 32f) };
-        _runReportButton.Pressed += RunSummaryReport.OpenLatest;
+        _runReportButton.Pressed += RunSummaryReport.OpenCurrent;
         AddChild(_runReportButton);
 
         _damageGoldTabButton = new Button { Text = "Damage & Gold", Position = new Vector2(16f, 44f), Size = new Vector2(140f, 28f) };

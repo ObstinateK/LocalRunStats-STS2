@@ -3,46 +3,52 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
-using System.Text.Json.Nodes;
 using Godot;
 using MegaCrit.Sts2.Core.Logging;
+using MegaCrit.Sts2.Core.Map;
 using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Rooms;
+using MegaCrit.Sts2.Core.Runs;
+using MegaCrit.Sts2.Core.Runs.History;
+using MegaCrit.Sts2.Core.Saves.Runs;
 
 namespace LocalRunStats;
 
-// Generates a floor-by-floor HTML report for the most recently finished run
-// (styled after sts2runs.com's own /run/{id} page, which the user pointed to
-// as the target layout) and opens it in the system's default browser.
-// Triggered by a button on StatsGraphOverlay.
+// Generates a floor-by-floor HTML report for the CURRENT run (styled after
+// sts2runs.com's own /run/{id} page, which the user pointed to as the target
+// layout) and opens it in the system's default browser. Triggered by a
+// button on StatsGraphOverlay.
 //
-// Local history/*.run files are only written once a run actually ends (win,
-// death, or abandon — see HistoryStatsEngine's notes on the same files), so
-// "most recently modified .run file" naturally means "the run that just
-// finished" without needing a dedicated run-end hook.
-//
-// Card/relic/potion/monster/event ids in the .run JSON (e.g. "CARD.REAVE")
-// are resolved to real display names via ModelDb.GetByIdOrNull<T> against
-// the live game's model registry — this works even for cards/relics this
-// player never picked, since ModelDb holds every canonical definition, not
-// just ones "in play" this run (same technique as
-// CombatStatsListener.GetEncounterDisplayName, just string-id-based instead
-// of starting from a live CombatRoom).
+// Reads RunManager.Instance.History directly — a LIVE, always-up-to-date
+// object the game itself maintains throughout the run (confirmed via
+// reflection: RunManager is a static singleton with a `RunHistory History`
+// property; RunHistory.MapPointHistory is a flat, growing List<> updated as
+// the run progresses, NOT the nested-per-act structure the on-disk .run file
+// uses — that nesting is apparently introduced only at save/serialize time).
+// This replaced an earlier version that parsed the most-recently-modified
+// history/*.run file instead — reported live as showing "info from a
+// previous run" because .run files are only written once a run actually
+// ends, so it could never reflect an in-progress run. Reading the live
+// object fixes that and is simpler besides: strongly-typed C# objects
+// instead of JsonNode walking, and richer data (e.g. AncientChoiceHistoryEntry
+// and EventOptionHistoryEntry carry an already-resolved LocString Title, so
+// event/ancient flavor text no longer needs a separate localization lookup
+// the way the raw file's {"key":...,"table":...} shape would have).
 public static class RunSummaryReport
 {
-    public static void OpenLatest()
+    public static void OpenCurrent()
     {
         try
         {
-            var path = HistoryStatsEngine.FindAllRunFiles()
-                .OrderByDescending(File.GetLastWriteTimeUtc)
-                .FirstOrDefault();
-            if (path == null)
+            var runManager = RunManager.Instance;
+            var history = runManager?.History;
+            if (history == null)
             {
-                Log.Warn("[LocalRunStats] No run history file found for the run summary report.");
+                Log.Warn("[LocalRunStats] No active run history found for the run summary report.");
                 return;
             }
 
-            var html = BuildHtml(path);
+            var html = BuildHtml(history);
             var outDir = Path.Combine(Godot.OS.GetUserDataDir(), "mods", "local-run-stats");
             Directory.CreateDirectory(outDir);
             var outPath = Path.Combine(outDir, "run_summary.html");
@@ -57,77 +63,59 @@ public static class RunSummaryReport
     }
 
     // ---- Model-id -> display-name resolution ----
+    // Same ModelDb.GetByIdOrNull<T> technique as CombatStatsListener.GetEncounterDisplayName,
+    // just against a ModelId we already have in hand instead of a string to parse.
 
-    private static ModelId ParseId(string fullId)
-    {
-        var dot = fullId.IndexOf('.');
-        return dot < 0 ? new ModelId("", fullId) : new ModelId(fullId[..dot], fullId[(dot + 1)..]);
-    }
+    private static string Humanize(ModelId id) => Humanize(id.Entry);
 
     // Fallback for any id ModelDb can't resolve — "SHRINKER_BEETLE" -> "Shrinker Beetle".
-    private static string Humanize(string fullId)
+    private static string Humanize(string entry)
     {
-        var dot = fullId.LastIndexOf('.');
-        var entry = dot >= 0 ? fullId[(dot + 1)..] : fullId;
         var words = entry.Split('_', StringSplitOptions.RemoveEmptyEntries);
         return string.Join(" ", words.Select(w => w.Length == 0 ? w : char.ToUpperInvariant(w[0]) + w[1..].ToLowerInvariant()));
     }
 
-    private static string ResolveCardTitle(string fullId)
+    private static string ResolveCardTitle(ModelId id)
     {
-        if (string.IsNullOrEmpty(fullId)) return "";
-        try { return ModelDb.GetByIdOrNull<CardModel>(ParseId(fullId))?.Title ?? Humanize(fullId); }
-        catch { return Humanize(fullId); }
+        try { return ModelDb.GetByIdOrNull<CardModel>(id)?.Title ?? Humanize(id); }
+        catch { return Humanize(id); }
     }
 
-    private static string ResolveRelicTitle(string fullId)
+    private static string ResolveRelicTitle(ModelId id)
     {
-        if (string.IsNullOrEmpty(fullId)) return "";
-        try { return ModelDb.GetByIdOrNull<RelicModel>(ParseId(fullId))?.Title?.GetRawText() ?? Humanize(fullId); }
-        catch { return Humanize(fullId); }
+        try { return ModelDb.GetByIdOrNull<RelicModel>(id)?.Title?.GetRawText() ?? Humanize(id); }
+        catch { return Humanize(id); }
     }
 
-    private static string ResolvePotionTitle(string fullId)
+    private static string ResolvePotionTitle(ModelId id)
     {
-        if (string.IsNullOrEmpty(fullId)) return "";
-        try { return ModelDb.GetByIdOrNull<PotionModel>(ParseId(fullId))?.Title?.GetRawText() ?? Humanize(fullId); }
-        catch { return Humanize(fullId); }
+        try { return ModelDb.GetByIdOrNull<PotionModel>(id)?.Title?.GetRawText() ?? Humanize(id); }
+        catch { return Humanize(id); }
     }
 
-    private static string ResolveEncounterTitle(string fullId)
+    private static string ResolveEncounterTitle(ModelId id)
     {
-        if (string.IsNullOrEmpty(fullId)) return "";
-        try { return ModelDb.GetByIdOrNull<EncounterModel>(ParseId(fullId))?.Title?.GetRawText() ?? Humanize(fullId); }
-        catch { return Humanize(fullId); }
+        try { return ModelDb.GetByIdOrNull<EncounterModel>(id)?.Title?.GetRawText() ?? Humanize(id); }
+        catch { return Humanize(id); }
     }
 
-    private static string ResolveEventTitle(string fullId)
+    private static string ResolveEventTitle(ModelId id)
     {
-        if (string.IsNullOrEmpty(fullId)) return "";
-        try { return ModelDb.GetByIdOrNull<EventModel>(ParseId(fullId))?.Title?.GetRawText() ?? Humanize(fullId); }
-        catch { return Humanize(fullId); }
+        try { return ModelDb.GetByIdOrNull<EventModel>(id)?.Title?.GetRawText() ?? Humanize(id); }
+        catch { return Humanize(id); }
     }
 
-    private static string ResolveCharacterTitle(string fullId)
+    private static string ResolveCharacterTitle(ModelId id)
     {
-        if (string.IsNullOrEmpty(fullId)) return "";
-        try { return ModelDb.GetByIdOrNull<CharacterModel>(ParseId(fullId))?.Title?.GetRawText() ?? Humanize(fullId); }
-        catch { return Humanize(fullId); }
+        try { return ModelDb.GetByIdOrNull<CharacterModel>(id)?.Title?.GetRawText() ?? Humanize(id); }
+        catch { return Humanize(id); }
     }
-
-    // ---- JSON parsing (JsonNode, matching HistoryStatsEngine's style for
-    // reading these same .run files) ----
-
-    private static string Str(JsonNode n) { try { return n?.GetValue<string>(); } catch { return null; } }
-    private static int Int(JsonNode n) { try { return n?.GetValue<int>() ?? 0; } catch { return 0; } }
-    private static long Long(JsonNode n) { try { return n?.GetValue<long>() ?? 0; } catch { return 0; } }
-    private static bool Bool(JsonNode n) { try { return n?.GetValue<bool>() ?? false; } catch { return false; } }
 
     private sealed class PlayerInfo
     {
-        public long Id;
+        public ulong Id;
         public string CharacterName = "?";
-        public int FinalDeckCount;
+        public int CurrentDeckCount;
     }
 
     private sealed class FloorRow
@@ -149,66 +137,48 @@ public static class RunSummaryReport
         public List<string> CardsRemoved = new();
         public List<string> Curses = new();
         public List<string> RelicsGained = new();
+        public List<string> RelicsRemoved = new();
         public List<string> PotionsGained = new();
         public List<string> PotionsUsed = new();
+        public List<string> UpgradedCards = new();
         public string ExtraNote = "";
     }
 
-    private static string BuildHtml(string runFilePath)
+    private static string BuildHtml(RunHistory history)
     {
-        var root = JsonNode.Parse(File.ReadAllText(runFilePath));
-        if (root == null) throw new InvalidDataException("Empty/unparseable run file: " + runFilePath);
-
-        var win = Bool(root["win"]);
-        var wasAbandoned = Bool(root["was_abandoned"]);
-        var ascension = Int(root["ascension"]);
-        var runTimeSeconds = Int(root["run_time"]);
-        var seed = Str(root["seed"]) ?? "";
-        var killedByEncounter = Str(root["killed_by_encounter"]);
-
-        var players = new List<PlayerInfo>();
-        var playersNode = root["players"]?.AsArray();
-        if (playersNode != null)
+        var players = history.Players.Select(p => new PlayerInfo
         {
-            foreach (var p in playersNode)
-            {
-                if (p == null) continue;
-                players.Add(new PlayerInfo
-                {
-                    Id = Long(p["id"]),
-                    CharacterName = ResolveCharacterTitle(Str(p["character"]) ?? ""),
-                    FinalDeckCount = p["deck"]?.AsArray().Count ?? 0,
-                });
-            }
-        }
+            Id = p.Id,
+            CharacterName = ResolveCharacterTitle(p.Character),
+            CurrentDeckCount = p.Deck.Count(),
+        }).ToList();
 
-        // map_point_history is nested one sub-array PER ACT (confirmed
-        // against real local .run files: a run that reached Act 3 has 3
-        // outer entries), not a flat list of floors — flatten it here so
-        // floor numbers run continuously across the whole run, matching
-        // vanilla Slay the Spire's own floor-numbering convention.
-        var mapPoints = (root["map_point_history"]?.AsArray() ?? new JsonArray())
-            .SelectMany(actEntries => actEntries?.AsArray() ?? new JsonArray())
-            .ToList();
+        // Reconcile the running deck-size column against each player's
+        // CURRENT deck count (as of right now — this run may still be in
+        // progress) rather than assuming anything about how floor 1/Neow's
+        // floor tags FloorAddedToDeck: startingSize = currentSize -
+        // totalGained + totalRemoved, exact regardless of that tagging, and
+        // self-corrects every time the report is regenerated mid-run.
+        // MapPointHistory is nested one sub-list PER ACT (confirmed by the
+        // compiler, not just assumed: List<List<MapPointHistoryEntry>>) —
+        // same nesting as the on-disk .run file, apparently regardless of
+        // whether it's read live or after serialization. Flatten so floor
+        // numbers run continuously across the whole run, matching vanilla
+        // Slay the Spire's own floor-numbering convention.
+        var mapPoints = history.MapPointHistory.SelectMany(actEntries => actEntries).ToList();
 
-        // Reconcile the running deck-size column against each player's known
-        // FINAL count (see PlayerInfo.FinalDeckCount) rather than assuming
-        // anything about how floor 1 / Neow's floor tags floor_added_to_deck
-        // — starting size = final size - total gained + total removed, which
-        // is exact regardless of that tagging.
         var totalGained = players.ToDictionary(p => p.Id, _ => 0);
         var totalRemoved = players.ToDictionary(p => p.Id, _ => 0);
         foreach (var mp in mapPoints)
         {
-            foreach (var stat in mp?["player_stats"]?.AsArray() ?? new JsonArray())
+            foreach (var stat in mp.PlayerStats)
             {
-                var pid = Long(stat?["player_id"]);
-                if (!totalGained.ContainsKey(pid)) continue;
-                totalGained[pid] += stat["cards_gained"]?.AsArray().Count ?? 0;
-                totalRemoved[pid] += stat["cards_removed"]?.AsArray().Count ?? 0;
+                if (!totalGained.ContainsKey(stat.PlayerId)) continue;
+                totalGained[stat.PlayerId] += stat.CardsGained.Count;
+                totalRemoved[stat.PlayerId] += stat.CardsRemoved.Count;
             }
         }
-        var runningDeckSize = players.ToDictionary(p => p.Id, p => p.FinalDeckCount - totalGained[p.Id] + totalRemoved[p.Id]);
+        var runningDeckSize = players.ToDictionary(p => p.Id, p => p.CurrentDeckCount - totalGained[p.Id] + totalRemoved[p.Id]);
         var lastGold = players.ToDictionary(p => p.Id, _ => -1);
 
         var rowsByPlayer = players.ToDictionary(p => p.Id, _ => new List<FloorRow>());
@@ -217,25 +187,20 @@ public static class RunSummaryReport
         foreach (var mp in mapPoints)
         {
             floorNumber++;
-            var mapPointType = Str(mp?["map_point_type"]) ?? "unknown";
-            var room = mp?["rooms"]?.AsArray()?.FirstOrDefault();
-            var roomType = Str(room?["room_type"]) ?? mapPointType;
-            var modelId = Str(room?["model_id"]);
-            var turnsTaken = Int(room?["turns_taken"]);
-
-            var (typeLabel, typeCss, icon, defaultName) = DescribeRoom(mapPointType, roomType);
-            var name = modelId != null
-                ? (mapPointType is "monster" or "elite" or "boss" ? ResolveEncounterTitle(modelId) : ResolveEventTitle(modelId))
+            var room = mp.Rooms.FirstOrDefault();
+            var (typeLabel, typeCss, icon, defaultName) = DescribeRoom(mp.MapPointType);
+            var name = room?.ModelId != null
+                ? (mp.MapPointType is MapPointType.Monster or MapPointType.Elite or MapPointType.Boss
+                    ? ResolveEncounterTitle(room.ModelId)
+                    : ResolveEventTitle(room.ModelId))
                 : defaultName;
+            var turnsTaken = room?.TurnsTaken ?? 0;
 
-            foreach (var stat in mp?["player_stats"]?.AsArray() ?? new JsonArray())
+            foreach (var stat in mp.PlayerStats)
             {
-                var pid = Long(stat?["player_id"]);
-                if (!rowsByPlayer.TryGetValue(pid, out var rows)) continue;
+                if (!rowsByPlayer.TryGetValue(stat.PlayerId, out var rows)) continue;
 
-                var cardsGainedNode = stat["cards_gained"]?.AsArray() ?? new JsonArray();
-                var cardsRemovedNode = stat["cards_removed"]?.AsArray() ?? new JsonArray();
-                runningDeckSize[pid] += cardsGainedNode.Count - cardsRemovedNode.Count;
+                runningDeckSize[stat.PlayerId] += stat.CardsGained.Count - stat.CardsRemoved.Count;
 
                 var row = new FloorRow
                 {
@@ -245,88 +210,70 @@ public static class RunSummaryReport
                     Icon = icon,
                     Name = name,
                     TurnsTaken = turnsTaken,
-                    CurrentHp = Int(stat["current_hp"]),
-                    MaxHp = Int(stat["max_hp"]),
-                    DamageTaken = Int(stat["damage_taken"]),
-                    HpHealed = Int(stat["hp_healed"]),
-                    GoldBefore = lastGold[pid],
-                    GoldAfter = Int(stat["current_gold"]),
-                    DeckSize = runningDeckSize[pid],
+                    CurrentHp = stat.CurrentHp,
+                    MaxHp = stat.MaxHp,
+                    DamageTaken = stat.DamageTaken,
+                    HpHealed = stat.HpHealed,
+                    GoldBefore = lastGold[stat.PlayerId],
+                    GoldAfter = stat.CurrentGold,
+                    DeckSize = runningDeckSize[stat.PlayerId],
                 };
-                lastGold[pid] = row.GoldAfter;
+                lastGold[stat.PlayerId] = row.GoldAfter;
 
-                foreach (var c in cardsGainedNode)
+                foreach (var c in stat.CardsGained)
                 {
-                    var id = Str(c?["id"]);
-                    if (id == null) continue;
-                    if (id.StartsWith("CURSE.", StringComparison.OrdinalIgnoreCase)) row.Curses.Add(ResolveCardTitle(id));
-                    else row.CardsGained.Add(ResolveCardTitle(id));
+                    if (c.Id.Category.Equals("CURSE", StringComparison.OrdinalIgnoreCase)) row.Curses.Add(ResolveCardTitle(c.Id));
+                    else row.CardsGained.Add(ResolveCardTitle(c.Id));
                 }
-                foreach (var c in cardsRemovedNode)
-                {
-                    var id = Str(c?["id"]);
-                    if (id != null) row.CardsRemoved.Add(ResolveCardTitle(id));
-                }
+                foreach (var c in stat.CardsRemoved) row.CardsRemoved.Add(ResolveCardTitle(c.Id));
+                foreach (var id in stat.UpgradedCards) row.UpgradedCards.Add(ResolveCardTitle(id));
 
-                foreach (var r in stat["relic_choices"]?.AsArray() ?? new JsonArray())
-                {
-                    if (!Bool(r?["was_picked"])) continue;
-                    var id = Str(r?["choice"]);
-                    if (id != null) row.RelicsGained.Add(ResolveRelicTitle(id));
-                }
-                foreach (var r in stat["bought_relics"]?.AsArray() ?? new JsonArray())
-                {
-                    var id = Str(r);
-                    if (id != null) row.RelicsGained.Add(ResolveRelicTitle(id));
-                }
-                foreach (var a in stat["ancient_choice"]?.AsArray() ?? new JsonArray())
-                {
-                    if (!Bool(a?["was_chosen"])) continue;
-                    var textKey = Str(a?["TextKey"]);
-                    if (textKey != null) row.RelicsGained.Add(ResolveRelicTitle("RELIC." + textKey));
-                }
+                foreach (var choice in stat.RelicChoices) if (choice.wasPicked) row.RelicsGained.Add(ResolveRelicTitle(choice.choice));
+                foreach (var id in stat.BoughtRelics) row.RelicsGained.Add(ResolveRelicTitle(id));
+                foreach (var id in stat.RelicsRemoved) row.RelicsRemoved.Add(ResolveRelicTitle(id));
+                // AncientChoiceHistoryEntry.Title is already a resolved
+                // LocString (unlike the raw .run file's ancient_choice.TextKey,
+                // which needed guessing it was a relic id) — use it directly.
+                foreach (var a in stat.AncientChoices) if (a.WasChosen) row.RelicsGained.Add(a.Title?.GetRawText() ?? Humanize(a.TextKey ?? ""));
 
-                foreach (var p in stat["potion_choices"]?.AsArray() ?? new JsonArray())
-                {
-                    if (!Bool(p?["was_picked"])) continue;
-                    var id = Str(p?["choice"]);
-                    if (id != null) row.PotionsGained.Add(ResolvePotionTitle(id));
-                }
-                foreach (var p in stat["potion_used"]?.AsArray() ?? new JsonArray())
-                {
-                    var id = Str(p);
-                    if (id != null) row.PotionsUsed.Add(ResolvePotionTitle(id));
-                }
+                foreach (var choice in stat.PotionChoices) if (choice.wasPicked) row.PotionsGained.Add(ResolvePotionTitle(choice.choice));
+                foreach (var id in stat.BoughtPotions) row.PotionsGained.Add(ResolvePotionTitle(id));
+                foreach (var id in stat.PotionUsed) row.PotionsUsed.Add(ResolvePotionTitle(id));
 
-                if (mapPointType == "rest_site")
-                {
-                    var choices = (stat["rest_site_choices"]?.AsArray() ?? new JsonArray())
-                        .Select(Str).Where(s => s != null).Select(Humanize);
-                    row.ExtraNote = string.Join(", ", choices);
-                }
+                foreach (var id in stat.BoughtColorless) row.CardsGained.Add(ResolveCardTitle(id));
+
+                var notes = new List<string>();
+                if (mp.MapPointType == MapPointType.RestSite && stat.RestSiteChoices.Count > 0)
+                    notes.Add(string.Join(", ", stat.RestSiteChoices.Select(Humanize)));
+                // EventOptionHistoryEntry.Title is already resolved text —
+                // this is the one place the live object gives us something
+                // the raw .run file's {"key":...,"table":...} shape couldn't
+                // without a separate localization system.
+                if (stat.EventChoices.Count > 0)
+                    notes.Add(string.Join(", ", stat.EventChoices.Select(e => e.Title?.GetRawText()).Where(t => !string.IsNullOrEmpty(t))));
+                row.ExtraNote = string.Join(" — ", notes);
 
                 rows.Add(row);
             }
         }
 
-        return RenderHtml(win, wasAbandoned, ascension, runTimeSeconds, seed, killedByEncounter, players, rowsByPlayer);
+        return RenderHtml(history, players, rowsByPlayer);
     }
 
-    private static (string label, string css, string icon, string defaultName) DescribeRoom(string mapPointType, string roomType) => mapPointType switch
+    private static (string label, string css, string icon, string defaultName) DescribeRoom(MapPointType mapPointType) => mapPointType switch
     {
-        "monster" => ("MONSTER", "monster", "⚔️", "Monster"),
-        "elite" => ("ELITE", "elite", "💀", "Elite"),
-        "boss" => ("BOSS", "boss", "👑", "Boss"),
-        "shop" => ("SHOP", "shop", "🛍️", "Shop"),
-        "treasure" => ("TREASURE", "treasure", "💰", "Treasure"),
-        "rest_site" => ("REST", "rest", "🔥", "Rest Site"),
-        "ancient" => ("ANCIENT", "ancient", "❓", "Ancient"),
-        "unknown" => ("EVENT", "event", "❔", "Event"),
-        _ => (mapPointType.ToUpperInvariant(), "event", "❔", Humanize(roomType)),
+        MapPointType.Monster => ("MONSTER", "monster", "⚔️", "Monster"),
+        MapPointType.Elite => ("ELITE", "elite", "💀", "Elite"),
+        MapPointType.Boss => ("BOSS", "boss", "👑", "Boss"),
+        MapPointType.Shop => ("SHOP", "shop", "🛍️", "Shop"),
+        MapPointType.Treasure => ("TREASURE", "treasure", "💰", "Treasure"),
+        MapPointType.RestSite => ("REST", "rest", "🔥", "Rest Site"),
+        MapPointType.Ancient => ("ANCIENT", "ancient", "❓", "Ancient"),
+        MapPointType.Unknown => ("EVENT", "event", "❔", "Event"),
+        _ => (mapPointType.ToString().ToUpperInvariant(), "event", "❔", mapPointType.ToString()),
     };
 
-    private static string RenderHtml(bool win, bool wasAbandoned, int ascension, int runTimeSeconds, string seed,
-        string killedByEncounter, List<PlayerInfo> players, Dictionary<long, List<FloorRow>> rowsByPlayer)
+    private static string RenderHtml(RunHistory history, List<PlayerInfo> players, Dictionary<ulong, List<FloorRow>> rowsByPlayer)
     {
         var sb = new StringBuilder();
         sb.Append("<title>Run Summary</title><meta charset=\"utf-8\">");
@@ -365,13 +312,14 @@ th{color:var(--muted);font-weight:normal;font-size:11px;text-transform:uppercase
 </style>");
 
         sb.Append("<h1>Run Summary</h1>");
-        var outcome = wasAbandoned ? "Abandoned" : win ? "Victory" : "Defeat";
+        var runTimeSeconds = (int)history.RunTime;
+        var statusText = history.WasAbandoned ? "In Progress / Abandoned" : history.Win ? "Victory" : "Defeat";
         sb.Append("<div class=\"summary\">")
-          .Append(Escape(outcome)).Append(" &middot; Ascension ").Append(ascension)
+          .Append(Escape(statusText)).Append(" &middot; Ascension ").Append(history.Ascension)
           .Append(" &middot; ").Append(runTimeSeconds / 60).Append("m ").Append(runTimeSeconds % 60).Append('s')
-          .Append(" &middot; Seed ").Append(Escape(seed));
-        if (!win && !wasAbandoned && !string.IsNullOrEmpty(killedByEncounter))
-            sb.Append(" &middot; Killed by ").Append(Escape(ResolveEncounterTitle(killedByEncounter)));
+          .Append(" &middot; Seed ").Append(Escape(history.Seed ?? ""));
+        if (!history.Win && history.KilledByEncounter != null)
+            sb.Append(" &middot; Killed by ").Append(Escape(ResolveEncounterTitle(history.KilledByEncounter)));
         sb.Append("</div>");
 
         if (players.Count > 1)
@@ -411,9 +359,11 @@ th{color:var(--muted);font-weight:normal;font-size:11px;text-transform:uppercase
 
                 sb.Append("<td>");
                 AppendPillGroup(sb, "Cards", row.CardsGained, "pill-card");
+                AppendPillGroup(sb, "Upgraded", row.UpgradedCards, "pill-card");
                 AppendPillGroup(sb, "Curses", row.Curses, "pill-curse");
                 AppendPillGroup(sb, "Removed", row.CardsRemoved, "pill-removed");
                 AppendPillGroup(sb, "Relics", row.RelicsGained, "pill-relic");
+                AppendPillGroup(sb, "Relics Removed", row.RelicsRemoved, "pill-removed");
                 AppendPillGroup(sb, "Potions", row.PotionsGained, "pill-potion");
                 AppendPillGroup(sb, "Used", row.PotionsUsed, "pill-potion");
                 if (!string.IsNullOrEmpty(row.ExtraNote)) sb.Append("<div class=\"cat\">").Append(Escape(row.ExtraNote)).Append("</div>");

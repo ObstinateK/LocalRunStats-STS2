@@ -755,6 +755,67 @@ second localization-resolution system on top of the model-id one. Multiple
 `rooms[]` entries per map point (never observed, but the schema allows it)
 only render the first.
 
+### Fixed 2026-08-31: run report showed a previous run instead of the in-progress one
+
+Reported live: "make this live track? right now its showing me info from a
+previous run probably because im in the middle of a run." Correct diagnosis
+— `RunSummaryReport` originally parsed the most-recently-modified
+history/*.run FILE, and those are only written once a run actually ends
+(win/death/abandon), so it could never reflect a run still in progress.
+Found a better source via reflection: `RunManager` is a static singleton
+(`RunManager.Instance`) with a live `RunHistory History` property the game
+itself keeps up to date throughout the run — `RunSummaryReport.OpenCurrent()`
+(renamed from `OpenLatest()`) now reads `RunManager.Instance.History`
+directly instead of finding/parsing a file. Bonus: strongly-typed C# objects
+instead of JsonNode walking, and access to fields the raw file's schema
+didn't cleanly expose — `AncientChoiceHistoryEntry.Title` and
+`EventOptionHistoryEntry.Title` are already-resolved `LocString`s, so event/
+ancient-choice flavor text (explicitly cut from v1 as a scope decision) is
+now shown directly, no separate localization-table lookup needed.
+**Pitfall, caught by the compiler this time, not a live report**:
+`RunHistory.MapPointHistory` is `List<List<MapPointHistoryEntry>>` — nested
+one sub-list per act, same as the file format apparently regardless of
+whether it's read live or after serialization. `IRunState.MapPointHistory`
+has the identical nested shape (`IReadOnlyList<IReadOnlyList<...>>`). Fixed
+the same way as the file-based version: flatten via `SelectMany` before
+assigning continuous floor numbers.
+`HistoryStatsEngine.FindAllRunFiles` reverted back to `private` (was
+temporarily `internal` for the file-based version of this feature, no longer
+needed now that nothing outside HistoryStatsEngine calls it).
+
+### Added 2026-08-31: seed-unlocks.ps1 — copy main-save unlocks into the modded profile
+
+Requested: "can this be implemented to my main save, the save before the
+mods where i have everything unlocked?" then "yes do that and make it so
+that it works for other players as well." Confirmed via a raw user-string
+heap scan of sts2.dll (not just decompiled method bodies — grepped for the
+literal "modded" across the whole assembly) that the native mod loader
+unconditionally routes ANY modded session's saves to `steam/<id>/modded/
+profileN/...` instead of the normal `steam/<id>/profileN/...` — an
+`isModded`/`is_modded`-gated path branch, confirmed against this player's
+own folders (`profile1/saves/progress.save` vs `modded/profile1/saves/
+progress.save`, both present). This is a deliberate engine-level safeguard
+so mods can never touch the real save; there's no manifest flag or config to
+disable it, and it shouldn't be defeated even if there were one.
+
+Added `seed-unlocks.ps1` (repo root, alongside `pull-and-install.ps1`) —
+copies `progress.save` (unlock state only, not run history/prefs) FROM the
+vanilla profile INTO the matching modded profile, never the reverse. Backs
+up the modded profile's existing `progress.save` first with a timestamped
+suffix (`.pre-seed-yyyyMMdd-HHmmss`) before overwriting, so it's always
+reversible. Needs no configuration/parameters (unlike `pull-and-install.ps1`'s
+`-Sts2Path`) since save data lives at a fixed OS-level location
+(`%APPDATA%\SlayTheSpire2\steam`), not the game's variable install path.
+Loops every Steam account folder and every `profileN` slot found, so it
+works unmodified for any other player who pulls the repo and runs it
+locally — same game-running guard pattern as `pull-and-install.ps1` (refuses
+to run if `SlayTheSpire2.exe` is active, since the game may overwrite
+`progress.save` with its own in-memory state on exit/autosave, undoing the
+copy).
+Run live for this player: found a real profile1 pair, backed up the modded
+copy, seeded it, verified via MD5 that the modded profile's `progress.save`
+now byte-for-byte matches the main save's (183,585 bytes, matching hash).
+
 ### Not yet verified live (2026-08-31 batch, continued)
 
 None of the following have been tested in-game yet as of this note — all
@@ -775,4 +836,4 @@ run:
   all charts, card-count panels, and the live Damage HUD table.
 - Turns chart collapsed to a single shared series instead of per-player.
 - Real enemy display names (via combatRoom.Encounter.Title) replacing internal encounter ids.
-- Browser-based run summary report (RunSummaryReport.cs) — JSON-parsing logic smoke-tested standalone (see above), but the ModelDb-based title resolution, the "Run Report" button, and the generated page's actual appearance in a browser have not been exercised live.
+- Browser-based run summary report, now reading RunManager.Instance.History live instead of parsing a file (superseded the file-based version below before it was ever tested live) — the flattening fix was caught by the compiler, not a live test; the ModelDb-based title resolution, the "Run Report" button, and the generated page's actual appearance/live-updating in a browser have not been exercised live yet.
