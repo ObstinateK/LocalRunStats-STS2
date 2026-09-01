@@ -978,6 +978,90 @@ live before landing:
    Initialize()`, or its hook overrides silently never fire, with no error
    anywhere.
 
+### Added 2026-09-01: map path advisor — highlights the best remaining path for a chosen goal
+
+Requested: "is there a way to calculate ideal map path to take? like best
+path for most upgrades or most elites or most question marks." Asked two
+clarifying questions first (single goal with a toggle vs. multiple goals
+shown at once; highlighted on the actual map vs. a separate panel/report) —
+user chose single-goal-with-toggle, highlighted directly on the in-game map.
+
+`MapPathAdvisor.ComputeBestPath(MapPoint from, Goal goal)` — the map is a
+DAG (`MapPoint.Children` only ever points to the next row up, confirmed via
+reflection), so this is longest-path-in-a-DAG: BFS out from `from` to
+collect every reachable node, process rows in DESCENDING order (boss-ward
+first) so each node's children are already scored, `bestScore[node] =
+weight(node) + max(children's bestScore)`, reconstruct forward via a
+recorded best-child pointer. `Weight` is 1 for the goal's target
+`MapPointType` (Elite/Unknown["Events"]/RestSite["Upgrades" — a rest site
+only OFFERS the choice to upgrade, doesn't guarantee it, but it's the
+closest available proxy]/Shop/Treasure) and 0 otherwise.
+
+Display avoids any custom drawing: `NMapPoint` already has private
+`AnimHover()`/`AnimUnhover()` methods — the exact same visual a node gets
+from a normal mouse hover — found by decompiling `NNormalMapPoint.
+OnHighlightPointType`, which the game itself uses for the map LEGEND's
+"highlight all nodes of this type" feature
+(`NMapScreen.HighlightPointType`/`PointTypeHighlighted` event). Calling
+those (via Harmony `Traverse`, since they're private) on exactly the
+recommended path's nodes gets a fully native-looking highlight for free.
+`MapPathHighlightPatch` Postfixes `NMapScreen.Open` (adds a small
+`MapPathAdvisorPanel` goal-toggle button row on first open, re-highlights
+on every open thereafter so it reflects wherever the player currently is)
+and Prefixes `NMapScreen.Close` (clears any lingering highlight). Finds
+`NMapPoint` nodes via a generic recursive `GetChildren()` walk rather than
+reaching into `NMapScreen`'s private `_mapPointDictionary` — avoids one
+more private-field dependency for something a plain tree walk already
+gets for free.
+`GameContext.LocalPlayer.RunState.Map`/`.CurrentMapPoint` supply the live
+map graph and current position — same `IRunState` access pattern already
+established for `RunSummaryReport`. Falls back to `Map.StartingMapPoint`
+when `CurrentMapPoint` is null (very start of an act, before the first
+move) — path[0] is always "the room the player is already in," so only
+`path[1..]` gets highlighted, not the starting/current node itself.
+
+### Changed 2026-09-01: map path advisor — combat tie-break, locked-in position, fixed missing highlight after Ancient
+
+Three requests handled together:
+- **"pick path with minimal combat for all cases except elites"**:
+  `MapPathAdvisor.Weight` now returns `primary * PrimaryScale - combatPenalty`
+  (PrimaryScale=1000, combatPenalty=1 for Monster rooms when goal !=
+  Elites) instead of a bare 0/1. The large scale factor guarantees the
+  primary goal always wins the comparison first; among ties on the primary
+  goal, the path with fewer Monster rooms wins. Skipped for the Elites goal
+  itself since maximizing elites necessarily means more combat by
+  definition.
+- **Position tuning**: added X/Y sliders + a "Log Position" button to
+  `MapPathAdvisorPanel` (same tuning-panel-then-lock-in pattern as the
+  Damage HUD earlier in this mod) since the original hardcoded (16, 16)
+  sat on top of the relic display. Locked in at (29, 186) once reported;
+  tuning controls removed.
+- **"map highlights did not work after ancient... but worked after i did
+  the first combat"**: `RefreshHighlight` was reading
+  `GameContext.LocalPlayer?.RunState` — that static field is only populated
+  by this mod's OWN hooks (`AfterDamageGiven`, `AfterPlayerTurnStart`,
+  `AfterRewardTaken`), none of which necessarily fire before the very first
+  time the map opens in a run (right after the Ancient/Neow-equivalent
+  choice, which apparently doesn't route through `AfterRewardTaken` the way
+  normal card/relic rewards do). Fixed by reading `NMapScreen`'s own
+  private `_runState` field directly via Harmony `Traverse` instead —
+  `Open()` already uses it internally throughout its own body, so it's
+  guaranteed valid by the time our Postfix runs, sidestepping this mod's
+  hook-timing entirely rather than trying to fix the timing.
+
+### Fixed 2026-09-01: combat-avoidance tie-break never penalized Elite rooms
+
+Reported live with a screenshot: for the Events goal, two candidate paths
+tied on event count and total fight count, but one routed through an Elite
+and the other through a regular fight — the advisor picked the Elite one.
+Root cause: the tie-break penalty from the fix above only checked
+`MapPointType.Monster`, never `MapPointType.Elite` — an Elite room scored
+identically to an EMPTY room (0 penalty) under "avoid combat," so it could
+never lose to a path through a real fight. Fixed with a third scoring tier:
+primary goal count (dominant) -> avoid Elites (for every goal except
+Elites) -> avoid regular Monster fights (lowest priority). See
+`MapPathAdvisor.Weight`.
+
 ### Not yet verified live (2026-08-31 batch, continued)
 
 None of the following have been tested in-game yet as of this note — all
