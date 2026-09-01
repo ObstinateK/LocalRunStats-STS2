@@ -844,6 +844,140 @@ and printed at runtime) about turning Cloud sync off first, since this is
 exactly the kind of failure that looks like the script silently did nothing,
 when actually neither the script nor the game logged anything wrong.
 
+### Fixed 2026-09-01: run report went from "shows an old run" to "does nothing" — RunManager.Instance.History isn't actually live
+
+Reported live, after the RunManager.Instance.History rewrite above: "font
+still is unchanged. also run report button isnt doing anything" — then,
+after adding diagnostics, confirmed via log: `RunManager.Instance` was
+present but `.History` was consistently null throughout real mid-run
+gameplay (cards being played, combats completing). The earlier assumption —
+that `RunHistory History` on `RunManager` is a continuously-live object —
+was wrong. Decompiled `RunManager` itself to check: `History` is a plain
+nullable auto-property (`public RunHistory? History { get; set; }`) with no
+default; it's only ever ASSIGNED at specific points tied to saving/
+uploading a finished run (`RunHistoryUtilities.CreateRunHistoryEntry(...)`
+appears right where `History` gets built). It is NOT kept in sync during
+normal play — it's essentially the same "only populated near run-end"
+problem the original file-based version had, just one layer further in.
+The actual continuously-live source, confirmed by finding the game's OWN
+code writing to it during normal play
+(`UpdatePlayerStatsInMapPointHistory` -> `State.CurrentMapPointHistoryEntry
+?.GetEntry(player.NetId)`, called from a normal per-update path, not a
+save/upload path), is `IRunState.MapPointHistory` — accessible via
+`Player.RunState`, already used elsewhere in this mod (`GoldTracker` reads
+`player.RunState?.CurrentActIndex`). That same `GetEntry(player.NetId)` call
+also confirms `PlayerMapPointHistoryEntry.PlayerId` is keyed by **NetId**
+during live play, not the SteamID seen in the on-disk `.run` file's
+`player_id` field (that translation apparently happens only at
+save/serialize time) — matters because it's the join key against
+`CombatStatsListener.DamageByPlayer`.
+`RunSummaryReport` rewritten again: `OpenCurrent()` now reads
+`GameContext.LocalPlayer?.RunState` instead of `RunManager.Instance.History`.
+`IRunState` has no player-roster/deck-list API the way `RunHistory` did, so
+two things changed: the player list is now built from whoever actually
+appears in the map point history (in first-seen order) with names resolved
+via `CombatStatsListener.DamageByPlayer` instead of `RunHistory.Players`,
+and the **Deck size column was dropped entirely** rather than guess at
+another possibly-wrong live "current deck count" source — no obvious
+equivalent to `RunHistoryPlayer.Deck` was found on `IRunState` in the time
+spent on this bug already. The report header also dropped
+Win/WasAbandoned/Seed/RunTime/KilledByEncounter (only meaningful for a
+finished run, and not on `IRunState` either) in favor of current
+Ascension/Act/Floor, which fits "in progress" better anyway.
+**Debugging note worth keeping**: two separate `Log.Info` calls added
+earlier to narrow this down (RunManager.Instance null-check,
+.History null-check) never once appeared in the log across many button
+presses, despite being simple unconditional straight-line code sitting
+between two OTHER log lines (one Info, one Warn) that both printed
+reliably every single time. Never root-caused — worked around by folding
+the same diagnostic into the reliable Warn call instead. If a future
+Log.Info mysteriously "disappears" again, don't assume the code path wasn't
+reached — reach for Warn/Error or fold the detail into an existing reliable
+log line rather than trusting a new bare Log.Info to show up.
+**Also reverted this session, per explicit request ("revert all font
+changes and shelf it for now")**: the ChartCanvas/CardPlayCountsPanel
+in-game-font work (GetThemeFont/FontHelper attempts) — back to
+`ThemeDB.FallbackFont`, `FontHelper.cs` deleted. Two guesses
+(`ThemeDB.GetProjectTheme()?.DefaultFont`, then `GetThemeFont("font",
+"Label")`) both reportedly changed nothing visible; unclear which
+assumption was wrong (that STS2 uses "Label" as its themed type, that
+`GetThemeFont` was resolving correctly at all, or something else) since no
+further diagnostics were run on it before it was shelved. Revisit by adding
+logging similar to what the Doom/gold/turns bugs needed — guessing font
+theme types blind clearly wasn't working.
+
+### Added 2026-09-01: per-card Times Played / Times Drawn hover tooltip
+
+Requested with a reference implementation:
+https://github.com/rmac-silva/CardTracker — a separate STS2 mod that shows
+Times Played/Drawn (and Power uptime) on card hover tooltips. Read its
+source directly (CardRegistrar.cs, the Patches/ files) to understand its
+approach before adapting rather than guessing from the feature name alone.
+Confirmed via decompile that its two Hook patches
+(`Hook.AfterCardPlayed`/`Hook.ModifyCardBeingAddedToDeck`) match hooks this
+mod already uses in a cleaner form (`CombatStatsListener.AfterCardPlayed`,
+`RunStateListener.ShouldAddToDeck`) — no need to Harmony-patch those. The
+one genuinely new hook, `Hook.AfterCardDrawn`, dispatches to
+`AbstractModel.AfterCardDrawn(PlayerChoiceContext, CardModel, bool
+fromHandDraw)` — a normal override, same as everywhere else in this mod, no
+Harmony needed there either.
+Added `CardStatsTracker` (new `SingletonModel`): `Dictionary<string card-id
+[+ "_UPGRADED"], Stats{Played,Drawn}>`, reset per run alongside
+`CombatStatsListener`/`RunContext` in `CombatDamageHudPatch`. Simpler key
+than the reference mod's (which also distinguishes enchanted/"generated
+this combat" variants) — scoped down deliberately, can extend later.
+The display side DOES still need Harmony, since there's no AbstractModel
+hook for "a card's hover tooltip is being built": `CardStatsTooltipPatch`
+patches `NCardHolder.CreateHoverTips` (`protected virtual`, decompiled body
+confirmed as just `NHoverTipSet.CreateAndShow(this,
+CardNode.Model.HoverTips)`), Prefix-returning false after replicating that
+call with one extra `HoverTip` appended to a copy of the card's own
+`HoverTips` list — appending to (not replacing) that list means all of the
+card's normal keyword tooltips stay intact.
+**Improved on the reference implementation, not just copied it**:
+`HoverTip.Id`/`IsSmart` turned out to have PUBLIC setters (reflection
+initially reported all of Title/Description/Id/IsSmart/Icon as
+"set=True" — that flag doesn't distinguish public from non-public setters,
+which the compiler then caught for Title/Description/Icon specifically:
+CS0200 "cannot be assigned to -- it is read only"). So only those three
+need the reference mod's Harmony `Traverse` workaround; `Id`/`IsSmart` are
+set directly via a normal object initializer.
+Only patches `NCardHolder.CreateHoverTips` (hand/rewards/shop — anywhere a
+card sits in a "holder"), NOT `NInspectCardScreen.UpdateCardDisplay` (the
+dedicated deck-viewer inspect screen) the way the reference mod's second
+patch does — deliberately out of scope for this pass, since that second
+patch leans on four private-field `AccessTools.Field` reflections
+(`_card`/`_cards`/`_index`/`_hoverTipRect`) that add real fragility for
+what's a secondary surface (deck viewer) vs. the primary one (hand hover
+during combat, which is covered). Revisit if the deck-viewer view turns out
+to matter enough to be worth it.
+
+### Fixed 2026-09-01: card stats tooltip showed nothing — new hook listeners aren't auto-registered
+
+Two separate bugs found in sequence testing the feature above, both fixed
+live before landing:
+
+1. **"hovering isnt showing any stats", no errors logged** — root cause and
+   fix documented above (the NCardHolder/NPreviewCardHolder/
+   NSelectedHandCardHolder three-way patch).
+2. **Still nothing after that fix, tooltip patches confirmed firing via
+   diagnostic logging but always with `stats=NONE`, even for cards played
+   dozens of times** — this mod does NOT auto-register new
+   SingletonModel/AbstractModel subclasses for combat/run-state hooks the
+   way ModelDb.Init() auto-CONSTRUCTS them. `RunStatsRecorder.Initialize()`
+   explicitly lists which model instances receive hooks:
+   `ModHelper.SubscribeForCombatStateHooks("local-run-stats", _ => new[] {
+   CombatStatsListener.Instance })` — `CardStatsTracker.Instance` was never
+   added to that array, so `ShouldReceiveCombatHooks => true` on the new
+   class did nothing on its own; `AfterCardPlayed`/`AfterCardDrawn` were
+   simply never invoked on it. Fixed by adding `CardStatsTracker.Instance`
+   to that same array. **Lesson for any future new hook-listening
+   SingletonModel**: `ShouldReceiveCombatHooks`/`ShouldReceiveRunStateHooks`
+   alone are NOT sufficient — the instance also has to be added to the
+   corresponding `ModHelper.Subscribe...` call in `RunStatsRecorder.
+   Initialize()`, or its hook overrides silently never fire, with no error
+   anywhere.
+
 ### Not yet verified live (2026-08-31 batch, continued)
 
 None of the following have been tested in-game yet as of this note — all

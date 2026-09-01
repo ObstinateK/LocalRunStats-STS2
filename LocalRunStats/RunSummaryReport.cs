@@ -19,36 +19,39 @@ namespace LocalRunStats;
 // layout) and opens it in the system's default browser. Triggered by a
 // button on StatsGraphOverlay.
 //
-// Reads RunManager.Instance.History directly — a LIVE, always-up-to-date
-// object the game itself maintains throughout the run (confirmed via
-// reflection: RunManager is a static singleton with a `RunHistory History`
-// property; RunHistory.MapPointHistory is a flat, growing List<> updated as
-// the run progresses, NOT the nested-per-act structure the on-disk .run file
-// uses — that nesting is apparently introduced only at save/serialize time).
-// This replaced an earlier version that parsed the most-recently-modified
-// history/*.run file instead — reported live as showing "info from a
-// previous run" because .run files are only written once a run actually
-// ends, so it could never reflect an in-progress run. Reading the live
-// object fixes that and is simpler besides: strongly-typed C# objects
-// instead of JsonNode walking, and richer data (e.g. AncientChoiceHistoryEntry
-// and EventOptionHistoryEntry carry an already-resolved LocString Title, so
-// event/ancient flavor text no longer needs a separate localization lookup
-// the way the raw file's {"key":...,"table":...} shape would have).
+// Reads GameContext.LocalPlayer.RunState.MapPointHistory (an IRunState) —
+// NOT RunManager.Instance.History, which an earlier version of this used.
+// Confirmed via decompile that RunManager.History is nullable and only ever
+// gets ASSIGNED at specific points (saving/uploading a finished run) rather
+// than kept continuously live — reported live as "No active run history
+// found" every time it was tried mid-run, with RunManager.Instance itself
+// present but .History staying null throughout actual gameplay. The genuine
+// live source is IRunState.MapPointHistory: found the game's own
+// UpdatePlayerStatsInMapPointHistory writing to entries via
+// State.CurrentMapPointHistoryEntry.GetEntry(player.NetId) during normal
+// play, confirming PlayerMapPointHistoryEntry.PlayerId is keyed by NetId
+// (not the SteamID seen in the final serialized .run file) while a run is
+// in progress. IRunState has no player roster/deck-list API the way
+// RunHistory did, so the player list here comes from
+// CombatStatsListener.DamageByPlayer instead (already tracks NetId ->
+// CharacterName for every player who's dealt damage, taken damage, or
+// played a card) — and the deck-size column was dropped rather than guess
+// at a live "current deck" source that doesn't obviously exist on IRunState.
 public static class RunSummaryReport
 {
     public static void OpenCurrent()
     {
+        Log.Info("[LocalRunStats] Run Report button pressed.");
         try
         {
-            var runManager = RunManager.Instance;
-            var history = runManager?.History;
-            if (history == null)
+            var runState = GameContext.LocalPlayer?.RunState;
+            if (runState == null)
             {
-                Log.Warn("[LocalRunStats] No active run history found for the run summary report.");
+                Log.Warn("[LocalRunStats] No active run found for the run summary report (GameContext.LocalPlayer or its RunState is null).");
                 return;
             }
 
-            var html = BuildHtml(history);
+            var html = BuildHtml(runState);
             var outDir = Path.Combine(Godot.OS.GetUserDataDir(), "mods", "local-run-stats");
             Directory.CreateDirectory(outDir);
             var outPath = Path.Combine(outDir, "run_summary.html");
@@ -115,7 +118,6 @@ public static class RunSummaryReport
     {
         public ulong Id;
         public string CharacterName = "?";
-        public int CurrentDeckCount;
     }
 
     private sealed class FloorRow
@@ -132,7 +134,6 @@ public static class RunSummaryReport
         public int HpHealed;
         public int GoldBefore;
         public int GoldAfter;
-        public int DeckSize;
         public List<string> CardsGained = new();
         public List<string> CardsRemoved = new();
         public List<string> Curses = new();
@@ -144,43 +145,34 @@ public static class RunSummaryReport
         public string ExtraNote = "";
     }
 
-    private static string BuildHtml(RunHistory history)
+    private static string BuildHtml(IRunState runState)
     {
-        var players = history.Players.Select(p => new PlayerInfo
+        // MapPointHistory is nested one sub-list PER ACT — same nesting as
+        // the on-disk .run file. Flatten so floor numbers run continuously
+        // across the whole run, matching vanilla Slay the Spire's own
+        // floor-numbering convention.
+        var mapPoints = runState.MapPointHistory.SelectMany(actEntries => actEntries).ToList();
+
+        // IRunState has no player-roster API (unlike the old RunHistory
+        // approach) — build the roster from whoever actually appears in the
+        // map point history, in first-seen order, naming them via
+        // CombatStatsListener's already-tracked NetId -> CharacterName map
+        // (populated for anyone who's dealt/taken damage or played a card,
+        // which by this point in a run is effectively everyone).
+        var playerIds = new List<ulong>();
+        var seenIds = new HashSet<ulong>();
+        foreach (var mp in mapPoints)
+            foreach (var stat in mp.PlayerStats)
+                if (seenIds.Add(stat.PlayerId)) playerIds.Add(stat.PlayerId);
+
+        var damageByPlayer = CombatStatsListener.Instance.DamageByPlayer;
+        var players = playerIds.Select(id => new PlayerInfo
         {
-            Id = p.Id,
-            CharacterName = ResolveCharacterTitle(p.Character),
-            CurrentDeckCount = p.Deck.Count(),
+            Id = id,
+            CharacterName = damageByPlayer.TryGetValue(id, out var tracker) ? tracker.CharacterName : $"Player {id}",
         }).ToList();
 
-        // Reconcile the running deck-size column against each player's
-        // CURRENT deck count (as of right now — this run may still be in
-        // progress) rather than assuming anything about how floor 1/Neow's
-        // floor tags FloorAddedToDeck: startingSize = currentSize -
-        // totalGained + totalRemoved, exact regardless of that tagging, and
-        // self-corrects every time the report is regenerated mid-run.
-        // MapPointHistory is nested one sub-list PER ACT (confirmed by the
-        // compiler, not just assumed: List<List<MapPointHistoryEntry>>) —
-        // same nesting as the on-disk .run file, apparently regardless of
-        // whether it's read live or after serialization. Flatten so floor
-        // numbers run continuously across the whole run, matching vanilla
-        // Slay the Spire's own floor-numbering convention.
-        var mapPoints = history.MapPointHistory.SelectMany(actEntries => actEntries).ToList();
-
-        var totalGained = players.ToDictionary(p => p.Id, _ => 0);
-        var totalRemoved = players.ToDictionary(p => p.Id, _ => 0);
-        foreach (var mp in mapPoints)
-        {
-            foreach (var stat in mp.PlayerStats)
-            {
-                if (!totalGained.ContainsKey(stat.PlayerId)) continue;
-                totalGained[stat.PlayerId] += stat.CardsGained.Count;
-                totalRemoved[stat.PlayerId] += stat.CardsRemoved.Count;
-            }
-        }
-        var runningDeckSize = players.ToDictionary(p => p.Id, p => p.CurrentDeckCount - totalGained[p.Id] + totalRemoved[p.Id]);
         var lastGold = players.ToDictionary(p => p.Id, _ => -1);
-
         var rowsByPlayer = players.ToDictionary(p => p.Id, _ => new List<FloorRow>());
 
         var floorNumber = 0;
@@ -200,8 +192,6 @@ public static class RunSummaryReport
             {
                 if (!rowsByPlayer.TryGetValue(stat.PlayerId, out var rows)) continue;
 
-                runningDeckSize[stat.PlayerId] += stat.CardsGained.Count - stat.CardsRemoved.Count;
-
                 var row = new FloorRow
                 {
                     FloorNumber = floorNumber,
@@ -216,7 +206,6 @@ public static class RunSummaryReport
                     HpHealed = stat.HpHealed,
                     GoldBefore = lastGold[stat.PlayerId],
                     GoldAfter = stat.CurrentGold,
-                    DeckSize = runningDeckSize[stat.PlayerId],
                 };
                 lastGold[stat.PlayerId] = row.GoldAfter;
 
@@ -257,7 +246,7 @@ public static class RunSummaryReport
             }
         }
 
-        return RenderHtml(history, players, rowsByPlayer);
+        return RenderHtml(runState, players, rowsByPlayer);
     }
 
     private static (string label, string css, string icon, string defaultName) DescribeRoom(MapPointType mapPointType) => mapPointType switch
@@ -273,7 +262,7 @@ public static class RunSummaryReport
         _ => (mapPointType.ToString().ToUpperInvariant(), "event", "❔", mapPointType.ToString()),
     };
 
-    private static string RenderHtml(RunHistory history, List<PlayerInfo> players, Dictionary<ulong, List<FloorRow>> rowsByPlayer)
+    private static string RenderHtml(IRunState runState, List<PlayerInfo> players, Dictionary<ulong, List<FloorRow>> rowsByPlayer)
     {
         var sb = new StringBuilder();
         sb.Append("<title>Run Summary</title><meta charset=\"utf-8\">");
@@ -311,15 +300,17 @@ th{color:var(--muted);font-weight:normal;font-size:11px;text-transform:uppercase
 .player-view.active{display:block;}
 </style>");
 
+        // This is a snapshot of a run that's still IN PROGRESS (that's the
+        // whole point — see the class doc comment) — Win/WasAbandoned/Seed/
+        // RunTime/KilledByEncounter only make sense for a finished run and
+        // aren't on IRunState anyway, so the header shows where you
+        // currently are instead of a final outcome.
         sb.Append("<h1>Run Summary</h1>");
-        var runTimeSeconds = (int)history.RunTime;
-        var statusText = history.WasAbandoned ? "In Progress / Abandoned" : history.Win ? "Victory" : "Defeat";
-        sb.Append("<div class=\"summary\">")
-          .Append(Escape(statusText)).Append(" &middot; Ascension ").Append(history.Ascension)
-          .Append(" &middot; ").Append(runTimeSeconds / 60).Append("m ").Append(runTimeSeconds % 60).Append('s')
-          .Append(" &middot; Seed ").Append(Escape(history.Seed ?? ""));
-        if (!history.Win && history.KilledByEncounter != null)
-            sb.Append(" &middot; Killed by ").Append(Escape(ResolveEncounterTitle(history.KilledByEncounter)));
+        sb.Append("<div class=\"summary\">In Progress")
+          .Append(" &middot; Ascension ").Append(runState.AscensionLevel)
+          .Append(" &middot; Act ").Append(runState.CurrentActIndex + 1)
+          .Append(", Floor ").Append(runState.ActFloor)
+          .Append(" (Floor ").Append(runState.TotalFloor).Append(" overall)");
         sb.Append("</div>");
 
         if (players.Count > 1)
@@ -338,7 +329,7 @@ th{color:var(--muted);font-weight:normal;font-size:11px;text-transform:uppercase
         {
             var player = players[i];
             sb.Append("<div class=\"player-view").Append(i == 0 ? " active" : "").Append("\" id=\"player-").Append(i).Append("\">");
-            sb.Append("<table><thead><tr><th></th><th>Floor</th><th>Type</th><th>Name</th><th>HP</th><th>Gold</th><th>Deck</th><th>Details</th></tr></thead><tbody>");
+            sb.Append("<table><thead><tr><th></th><th>Floor</th><th>Type</th><th>Name</th><th>HP</th><th>Gold</th><th>Details</th></tr></thead><tbody>");
             foreach (var row in rowsByPlayer.GetValueOrDefault(player.Id, new List<FloorRow>()))
             {
                 sb.Append("<tr>");
@@ -355,7 +346,6 @@ th{color:var(--muted);font-weight:normal;font-size:11px;text-transform:uppercase
                 sb.Append("</td>");
 
                 sb.Append("<td>").Append(row.GoldBefore < 0 ? "&mdash;" : row.GoldBefore.ToString()).Append(" → ").Append(row.GoldAfter).Append("</td>");
-                sb.Append("<td>").Append(row.DeckSize).Append("</td>");
 
                 sb.Append("<td>");
                 AppendPillGroup(sb, "Cards", row.CardsGained, "pill-card");

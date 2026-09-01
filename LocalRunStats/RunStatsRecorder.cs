@@ -18,7 +18,7 @@ public static class RunStatsRecorder
     {
         Directory.CreateDirectory(StatsDir);
         ModManager.OnMetricsUpload += OnRunFinished;
-        ModHelper.SubscribeForCombatStateHooks("local-run-stats", _ => new[] { CombatStatsListener.Instance });
+        ModHelper.SubscribeForCombatStateHooks("local-run-stats", _ => new MegaCrit.Sts2.Core.Models.AbstractModel[] { CombatStatsListener.Instance, CardStatsTracker.Instance });
         ModHelper.SubscribeForRunStateHooks("local-run-stats", _ => new MegaCrit.Sts2.Core.Models.AbstractModel[] { RunStateListener.Instance, GoldTracker.Instance });
         Log.Info("[LocalRunStats] Subscribed to ModManager.OnMetricsUpload, combat hooks, and run-state hooks. Stats dir: " + StatsDir);
         HistoryStatsEngine.Refresh();
