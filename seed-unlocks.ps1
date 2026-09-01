@@ -11,6 +11,15 @@
 #
 #   powershell -File .\seed-unlocks.ps1
 #
+# IMPORTANT - turn off Steam Cloud sync for Slay the Spire 2 FIRST, or this
+# won't stick: Steam Library -> right-click Slay the Spire 2 -> Properties ->
+# General -> turn off "Keep saves in the Steam Cloud" (wording varies).
+# Confirmed live: with Cloud sync on, launching the game after running this
+# script silently pulled the old cloud-synced progress.save back down before
+# the game even read it, reverting the seed with no error or warning shown -
+# the file just quietly reverted to its old content on next launch. Once
+# Cloud sync was turned off, re-running the script worked immediately.
+#
 # Close Slay the Spire 2 first - the game may overwrite progress.save with
 # its own in-memory state on exit/autosave, undoing this copy.
 # Safe to re-run any time you want to re-sync (e.g. after unlocking more on
@@ -22,6 +31,8 @@
 # OS-level location, not the game's (variable) install path.
 
 $ErrorActionPreference = "Stop"
+
+Write-Host "Reminder: this only works if Steam Cloud sync is OFF for Slay the Spire 2 (Steam Library -> right-click the game -> Properties -> General). If Cloud sync is on, your seeded unlocks will silently revert the next time you launch the game." -ForegroundColor Yellow
 
 $gameLock = Get-Process -Name "SlayTheSpire2" -ErrorAction SilentlyContinue
 if ($gameLock) {

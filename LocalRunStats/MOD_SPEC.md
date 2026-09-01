@@ -816,6 +816,34 @@ Run live for this player: found a real profile1 pair, backed up the modded
 copy, seeded it, verified via MD5 that the modded profile's `progress.save`
 now byte-for-byte matches the main save's (183,585 bytes, matching hash).
 
+### Found 2026-08-31: Steam Cloud sync silently reverted the seeded unlocks
+
+Reported live: "i booted the game and my things are not unlocked (like
+timeline)" — right after the MD5-verified seed above. Re-checked the file
+after the user's session: `progress.save` had reverted to its OLD pre-seed
+content (85,578 bytes, MD5 matching both `progress.save.backup` and this
+script's own `.pre-seed-*` backup exactly), with no error logged anywhere.
+Investigated `ProgressSaveManager.LoadProgress()` first (suspected a
+validation/checksum rejection falling back to a hardcoded default on parse
+failure — decompiled and ruled out: on failure it resets to a bare
+Ironclad-only `ProgressState.CreateDefault()`, which would've been a much
+smaller file, not one matching the exact old byte-for-byte content) and
+`GameModeExtension.AreAchievementsAndEpochsLocked()` (checks
+`gameMode != GameMode.Standard` — Daily/Custom-mode gating, unrelated to
+mods, ruled out). The actual cause was simpler and outside the decompiled
+code entirely: this player had Steam Cloud sync ON for this game (confirmed
+`SteamRemoteSaveStore`/`CloudSaveStore` exist in sts2.dll, so Cloud saves are
+real here) — editing `progress.save` locally, then launching, let Steam pull
+the last cloud-synced version back down before the game ever read the seeded
+file, silently reverting it with no error shown anywhere. Fixed by turning
+Steam Cloud sync OFF for Slay the Spire 2 (Steam Library -> right-click ->
+Properties -> General) BEFORE re-running `seed-unlocks.ps1` — re-seeded,
+launched, confirmed live: Timeline unlocks now show correctly and persisted.
+`seed-unlocks.ps1` updated with a loud warning (both in the header comment
+and printed at runtime) about turning Cloud sync off first, since this is
+exactly the kind of failure that looks like the script silently did nothing,
+when actually neither the script nor the game logged anything wrong.
+
 ### Not yet verified live (2026-08-31 batch, continued)
 
 None of the following have been tested in-game yet as of this note — all
