@@ -29,6 +29,11 @@ data anywhere.
   browser report (styled after sts2runs.com's run-detail page) for your **current, in-progress**
   run — HP/gold per floor, cards/relics/potions gained, monster names, and more. Co-op runs get a
   tab per player.
+- **Map Path Advisor** — a small "Best Path For:" panel on the map screen highlights the
+  recommended remaining route (using the game's own native hover highlight) for a goal you choose:
+  most Elites, most Events, most Upgrade opportunities (rest sites), most Shops, or most Treasure.
+  Ties on the chosen goal are broken by avoiding Elites, then avoiding regular fights — except when
+  the goal is Elites itself, where more combat is the point.
 
 ## Installing
 
