@@ -126,8 +126,41 @@ public static class PlayerStatsLog
     public static ChartData BuildDamageChartData(bool perStage, bool dealt, int? actFilter) =>
         BuildFightMetric(perStage, actFilter, r => dealt ? r.DamageDealt : r.DamageTaken);
 
-    public static ChartData BuildTurnsChartData(bool perStage, int? actFilter) =>
-        BuildFightMetric(perStage, actFilter, r => r.TurnsTaken);
+    // Deliberately NOT per-player, unlike the other charts: turns are shared
+    // across the whole player side in co-op (everyone's turn count for a
+    // given fight is identical, since it's tracked once per side's turn, not
+    // once per player — see CombatStatsListener._currentFightTurns), so a
+    // per-player breakdown here would just be N overlapping identical lines.
+    // Every player's row for a fight already carries the same TurnsTaken
+    // value, so taking just one representative row per fight is enough.
+    public static ChartData BuildTurnsChartData(bool perStage, int? actFilter)
+    {
+        var records = FilterToCurrentRun(ReadAllLines<PlayerCombatRecord>("player_combat_stats.jsonl"), r => r.Timestamp);
+        if (actFilter.HasValue) records = records.Where(r => r.ActIndex == actFilter.Value).ToList();
+        var data = new ChartData();
+        if (records.Count == 0) return data;
+
+        var fights = records.GroupBy(r => r.Timestamp).OrderBy(g => g.Key).ToList();
+        data.SeriesByPlayer["Turns"] = new List<float>();
+        var stageIndex = 0;
+        var runningTotal = 0f;
+        foreach (var fight in fights)
+        {
+            stageIndex++;
+            var first = fight.First();
+            data.XLabels.Add(perStage ? ShortenEncounterId(first.EncounterId, stageIndex) : stageIndex.ToString());
+            if (perStage)
+            {
+                data.SeriesByPlayer["Turns"].Add(first.TurnsTaken);
+            }
+            else
+            {
+                runningTotal += first.TurnsTaken;
+                data.SeriesByPlayer["Turns"].Add(runningTotal);
+            }
+        }
+        return data;
+    }
 
     public static ChartData BuildCardsPlayedChartData(bool perStage, int? actFilter) =>
         BuildFightMetric(perStage, actFilter, r => r.CardsPlayed);
@@ -214,62 +247,42 @@ public static class PlayerStatsLog
 
         var ordered = records.OrderBy(r => r.Timestamp).ToList();
         var displayNames = DisambiguateCharacterNames(ordered.Select(r => (r.PlayerNetId, r.CharacterName)));
+        var netIds = displayNames.Keys.ToList();
+        foreach (var netId in netIds) data.SeriesByPlayer[displayNames[netId]] = new List<float>();
 
-        if (perStage)
+        // Gold events fire at independent wall-clock moments per player —
+        // unlike a fight's PlayerCombatRecord rows, which all share one
+        // Timestamp written together in a single call, there's no natural
+        // shared "moment" to group raw gold events by. Grouping by Timestamp
+        // (as the damage/cards charts do) never actually aligned two
+        // players' gold changes onto the same x-axis tick — each real event
+        // got its own tick, so one player's line always looked "one tick
+        // behind" the other. Bucketing by StageIndex instead (advanced once
+        // per finished fight — see RunContext.AdvanceStage, called from
+        // CombatStatsListener.AfterCombatEnd) gives both players a genuinely
+        // shared x-axis: every gold change within the same stage of the run
+        // lands on the same tick, matching how the other charts group by
+        // fight rather than raw event order. OrderBy(Timestamp) above is
+        // preserved into each stage's group (GroupBy keeps source order), so
+        // ".Last()" below is each player's latest value as of that stage.
+        var stages = ordered.GroupBy(r => r.StageIndex).OrderBy(g => g.Key).ToList();
+        var lastKnown = netIds.ToDictionary(id => id, _ => 0f);
+
+        foreach (var stage in stages)
         {
-            // One bar per gold-gain event = the amount gained at that specific
-            // event (delta from that player's previous known total), not the
-            // running total — mirrors damage's per-fight raw value. Includes
-            // the baseline row RunContext.EnsureBaselineGoldCaptured writes at
-            // run start, so a player's very first bar is their starting gold,
-            // not their first real pickup on top of an assumed-zero balance.
-            var lastKnown = new Dictionary<ulong, float>();
-            var index = 0;
-            foreach (var r in ordered)
+            data.XLabels.Add(stage.Key.ToString());
+            foreach (var netId in netIds)
             {
-                index++;
-                data.XLabels.Add(index.ToString());
-                lastKnown.TryGetValue(r.PlayerNetId, out var previous);
-                var delta = System.Math.Max(0f, r.CurrentGold - previous);
-                lastKnown[r.PlayerNetId] = r.CurrentGold;
+                var startOfStage = lastKnown[netId];
+                var playerRowsThisStage = stage.Where(r => r.PlayerNetId == netId).ToList();
+                if (playerRowsThisStage.Count > 0) lastKnown[netId] = playerRowsThisStage.Last().CurrentGold;
 
-                foreach (var netId in lastKnown.Keys.ToList())
-                {
-                    var name = displayNames[netId];
-                    if (!data.SeriesByPlayer.TryGetValue(name, out var series))
-                    {
-                        series = new List<float>(new float[data.XLabels.Count - 1]);
-                        data.SeriesByPlayer[name] = series;
-                    }
-                    series.Add(netId == r.PlayerNetId ? delta : 0f);
-                }
-            }
-        }
-        else
-        {
-            // Same fix as BuildCumulativeFightMetric: align by actual
-            // chronological moment (grouped by Timestamp), not by each
-            // player's own event index — two players' gold events are
-            // independent, so "player A's 3rd pickup" and "player B's 3rd
-            // pickup" are not the same moment and shouldn't share an x-axis
-            // slot. The baseline row (see above) means every player's very
-            // first moment is their starting gold, not 0.
-            var netIds = displayNames.Keys.ToList();
-            var lastKnown = netIds.ToDictionary(id => id, _ => 0f);
-            foreach (var netId in netIds) data.SeriesByPlayer[displayNames[netId]] = new List<float>();
-
-            var moments = ordered.GroupBy(r => r.Timestamp).OrderBy(g => g.Key).ToList();
-            var index = 0;
-            foreach (var moment in moments)
-            {
-                index++;
-                data.XLabels.Add(index.ToString());
-                foreach (var netId in netIds)
-                {
-                    var record = moment.FirstOrDefault(r => r.PlayerNetId == netId);
-                    if (record != null) lastKnown[netId] = record.CurrentGold;
-                    data.SeriesByPlayer[displayNames[netId]].Add(lastKnown[netId]);
-                }
+                data.SeriesByPlayer[displayNames[netId]].Add(perStage
+                    // Total gold gained during this stage — mirrors damage's
+                    // per-fight raw value, not a running total.
+                    ? System.Math.Max(0f, lastKnown[netId] - startOfStage)
+                    // Cumulative total as of the end of this stage.
+                    : lastKnown[netId]);
             }
         }
         return data;
@@ -340,13 +353,14 @@ public static class PlayerStatsLog
 
     private static string Escape(string s) => s.Replace("[", "[lb]");
 
+    // encounterId is already the real in-game display name by this point
+    // (CombatStatsListener.GetEncounterDisplayName reads
+    // combatRoom.Encounter.Title, e.g. "Shrinker Beetle" — not the internal
+    // "ENCOUNTER.SHRINKER_BEETLE_WEAK" id), so this just truncates long names
+    // so chart labels don't overrun their space.
     private static string ShortenEncounterId(string encounterId, int fallbackIndex)
     {
         if (string.IsNullOrEmpty(encounterId)) return fallbackIndex.ToString();
-        // Encounter ids look like "ENCOUNTER.SHRINKER_BEETLE_WEAK" — strip the
-        // category prefix and truncate so labels don't overrun the chart.
-        var dot = encounterId.LastIndexOf('.');
-        var name = dot >= 0 ? encounterId[(dot + 1)..] : encounterId;
-        return name.Length > 10 ? name[..10] : name;
+        return encounterId.Length > 16 ? encounterId[..16] : encounterId;
     }
 }

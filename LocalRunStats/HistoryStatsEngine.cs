@@ -457,7 +457,9 @@ public static class HistoryStatsEngine
         File.AppendAllLines(CommunityRunCachePath, lines);
     }
 
-    private static IEnumerable<string> FindAllRunFiles()
+    // Internal (not private) so RunSummaryReport can reuse the same
+    // discovery logic to find the most recently finished run's file.
+    internal static IEnumerable<string> FindAllRunFiles()
     {
         var userDataDir = Godot.OS.GetUserDataDir();
         var steamRoot = Path.Combine(userDataDir, "steam");

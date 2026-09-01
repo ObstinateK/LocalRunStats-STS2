@@ -20,9 +20,11 @@ public sealed class PlayerDamageTracker
     public readonly Dictionary<int, int> TakenByActIndex = new();
     public int TotalTaken => TakenByActIndex.Values.Sum();
 
-    // Turns/cards-played aren't shown on the live HUD table, only in the
-    // graph overlay's per-fight log — so unlike Dealt/Taken, no ByAct/Total
+    // Cards-played isn't shown on the live HUD table, only in the graph
+    // overlay's per-fight log — so unlike Dealt/Taken, no ByAct/Total
     // tracking needed here, just a per-fight counter reset after each fight.
-    public int CurrentFightTurns;
+    // (Turns used to live here too, but it's shared across the whole player
+    // side in co-op, not meaningfully per-player — see
+    // CombatStatsListener._currentFightTurns.)
     public int CurrentFightCardsPlayed;
 }

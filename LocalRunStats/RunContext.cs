@@ -17,11 +17,29 @@ public static class RunContext
     // EnsureBaselineGoldCaptured.
     private static readonly HashSet<ulong> _playersWithBaselineGold = new();
 
+    // Shared "how many fights have ended so far" counter, advanced once per
+    // AfterCombatEnd (from CombatStatsListener) — NOT per player. Gold events
+    // fire at independent wall-clock moments per player (unlike a fight's
+    // PlayerCombatRecord rows, which all share one Timestamp written together
+    // in one call), so grouping gold by raw Timestamp never actually aligns
+    // two players' events onto the same x-axis tick — each real-world moment
+    // gets its own tick, so one player's line always looks "one tick behind"
+    // the other even though nothing is actually wrong with the data.
+    // Stamping every GoldRecord with this shared stage number instead (see
+    // GoldTracker/EnsureBaselineGoldCaptured) buckets both players' gold
+    // changes within the same stage of the run onto the same tick, matching
+    // how the Damage/Cards charts already group by fight rather than by raw
+    // event order.
+    public static int CurrentStageIndex { get; private set; }
+
     public static void ResetForNewRun()
     {
         CurrentRunStartUtc = DateTime.UtcNow;
         _playersWithBaselineGold.Clear();
+        CurrentStageIndex = 0;
     }
+
+    public static void AdvanceStage() => CurrentStageIndex++;
 
     // The gold chart only ever had rows from AfterGoldGained, so a player's
     // starting gold (100, same as vanilla STS) was invisible until their
@@ -45,6 +63,7 @@ public static class RunContext
         PlayerStatsLog.AppendJsonLine("gold_log.jsonl", new GoldRecord
         {
             Timestamp = CurrentRunStartUtc.ToString("o"),
+            StageIndex = CurrentStageIndex,
             ActIndex = 0,
             PlayerNetId = player.NetId,
             CharacterName = player.Character?.Title?.GetRawText() ?? "?",

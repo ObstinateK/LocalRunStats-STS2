@@ -34,6 +34,7 @@ public sealed class GoldTracker : SingletonModel
             var record = new GoldRecord
             {
                 Timestamp = DateTime.UtcNow.ToString("o"),
+                StageIndex = RunContext.CurrentStageIndex,
                 ActIndex = player.RunState?.CurrentActIndex ?? 0,
                 PlayerNetId = player.NetId,
                 CharacterName = player.Character?.Title?.GetRawText() ?? "?",

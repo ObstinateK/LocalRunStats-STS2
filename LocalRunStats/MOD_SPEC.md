@@ -623,6 +623,138 @@ FlowContainer needs an ANCESTOR that assigns it a real width to wrap
 against — nesting it inside a ScrollContainer alone isn't enough without also
 disabling that ScrollContainer's horizontal scroll.
 
+### Fixed 2026-08-31: gold chart still desynced after the baseline fix
+
+Reported live, after the baseline fix above: "initial gold looks good but
+the gold amounts are still desynced. its counting gold for another player
+one turn later." Root cause: `BuildGoldChartData` was grouping by raw
+`Timestamp`, same as the damage/cards charts — but unlike those, gold events
+don't have a natural shared moment to group by. A fight's `PlayerCombatRecord`
+rows are written together in one method call (`WritePerPlayerRecords`), so
+every player's row for that fight literally shares one Timestamp string. Gold
+events fire independently per player, at whatever real-world instant each
+player's `AfterGoldGained` happens to fire — those timestamps essentially
+never coincide, so every single gold event got its OWN x-axis tick, and the
+other player's line just carried its last value forward flat until their own
+next event. That reads exactly like "one turn behind," even though no data
+was actually lost or mislabeled.
+Fixed by bucketing on a new shared `RunContext.CurrentStageIndex` counter
+instead of `Timestamp` — advanced once per finished fight (`AdvanceStage()`,
+called from `CombatStatsListener.AfterCombatEnd`), stamped onto every
+`GoldRecord` (`GoldRecord.StageIndex`) at write time by both `GoldTracker`
+and `EnsureBaselineGoldCaptured`. `BuildGoldChartData` now groups by
+`StageIndex`: every gold change within the same stage of the run — including
+ones that happen outside combat (map rewards, shops, rest sites), which get
+attributed to "the stage since the last fight ended" — lands on the same
+tick for both players. Per-stage mode changed meaning along with this: a bar
+is now "total gold gained during this stage" (sum of that player's gains) —
+still a "raw value, not running total" like the other per-stage charts, just
+resolved per stage instead of per individual pickup event.
+
+### Changed 2026-08-31: Turns chart no longer splits by player
+
+Requested after noticing the per-player Turns lines were always identical:
+"you can remove turns taken tracker graphs as it will be the same for each
+player in multiplayer. replace this with turns taken by each combat
+disregarding multiplayer." Confirmed by decompiling `Hook.AfterSideTurnStart`
+— it fires once per SIDE's turn (`AbstractModel.AfterSideTurnStart(CombatSide
+side, IReadOnlyList<Creature> participants, ICombatState combatState)`), not
+once per player on that side, which is exactly the shared "how many turns
+has this fight had" signal needed. `CombatStatsListener` now tracks a single
+`_currentFightTurns` counter via this hook (incremented only when
+`side == CombatSide.Player`) instead of the old per-player counting in
+`AfterPlayerTurnStart` (which still exists, just for its other two side
+effects: `GameContext.LocalPlayer` and `EnsureBaselineGoldCaptured`).
+`PlayerCombatRecord.TurnsTaken` keeps its per-row shape for now (every
+player's row for a fight just carries the same shared value, so the existing
+act-filter/fight-grouping plumbing didn't need touching), but
+`PlayerStatsLog.BuildTurnsChartData` no longer uses the generic per-player
+`BuildFightMetric` helper — it reads one representative row per fight and
+renders a single "Turns" series instead of one line per player.
+
+### Changed 2026-08-31: encounter labels use real enemy names, not internal ids
+
+Reported live: "enemy names are currently shown as what its like in the
+code... can they be replaced to the actual in-game name like 'Shrinker
+Beetle', 'Ceremonial Beast'." `EncounterId` (used for the "Fight N: ___"
+labels on the per-fight card panel and chart x-axis labels) was
+`combatRoom.ModelId.ToString()` — the internal id, e.g.
+"ENCOUNTER.SHRINKER_BEETLE_WEAK". Confirmed via reflection that
+`CombatRoom.Encounter` (an `EncounterModel`) has a `Title` property of type
+`LocString` — same type/pattern already used for character names elsewhere
+in this mod (`player.Character?.Title?.GetRawText()`). Added
+`CombatStatsListener.GetEncounterDisplayName(CombatRoom)` —
+`combatRoom.Encounter?.Title?.GetRawText() ?? combatRoom.ModelId.ToString()`
+(falls back to the raw id only if the title is somehow unpopulated) — and
+used it at all three write sites that previously called
+`combatRoom.ModelId.ToString()` directly (`WriteAggregateRecord`,
+`WritePerPlayerRecords`, `WriteCardPlayCountsByFight`). `ShortenEncounterId`
+no longer needs its dot-prefix-stripping logic (there's no more
+"CATEGORY.NAME" namespacing to strip since the stored value is already a
+real display name) — simplified to a plain truncate, bumped from 10 to 16
+chars now that labels are real words instead of underscored codes.
+
+### Added 2026-08-31: browser-based run summary report
+
+Requested: "make a layout like this [sts2runs.com's /run/{id} floor-by-floor
+table] that i can see at the end of a run." Asked the user two design
+questions up front (co-op scope, trigger mechanism) since the source layout
+is inherently single-player-shaped:
+- **Co-op scope**: toggle between players (tabs at the top of the report,
+  not a combined multi-column view).
+- **Trigger**: a button ("Run Report") on the existing StatsGraphOverlay,
+  next to the close button — not auto-opened on run end.
+Chose to generate a static HTML file and open it via `OS.ShellOpen` rather
+than building this as native Godot UI: Godot has no table/grid layout
+primitive, and hand-rolling badges/pills/multi-column alignment via `_Draw()`
+(as ChartCanvas already does for charts) would be far more work than HTML/
+CSS for a design this table-heavy, for no real benefit since it only needs
+to open once per run, not live-update.
+
+New `RunSummaryReport.cs`: `OpenLatest()` finds the most-recently-modified
+`.run` file across all profiles (reuses `HistoryStatsEngine.FindAllRunFiles`,
+now `internal` instead of `private`) — local `.run` files are only written
+once a run actually ends (win/death/abandon), so "most recent file" always
+means "the run that just finished," with no dedicated run-end hook needed.
+Writes `mods/local-run-stats/run_summary.html` and opens it via
+`OS.ShellOpen`.
+
+Card/relic/potion/monster/event/character ids in the JSON (e.g.
+"CARD.REAVE") are resolved to real display names via
+`ModelDb.GetByIdOrNull<T>(new ModelId(category, entry))` against the live
+game's model registry — confirmed via reflection that `CardModel.Title` is
+a plain `String` (the one exception) while `RelicModel`/`PotionModel`/
+`MonsterModel`/`EncounterModel`/`EventModel`/`CharacterModel` all expose
+`LocString Title` (same pattern as `GetEncounterDisplayName`). This works
+even for cards/relics this player never picked, since ModelDb holds every
+canonical definition. Falls back to a humanized id (`SHRINKER_BEETLE` ->
+`Shrinker Beetle`) if a lookup fails.
+
+**Pitfall found via a standalone smoke test (not live in-game) before this
+ever reached the user**: `map_point_history` is NOT a flat list of floors —
+it's nested one sub-array PER ACT (confirmed against real local `.run`
+files: a run that reached Act 3 has 3 outer entries, one that stayed in Act
+1 has 1). A naive flat `foreach` over the outer array crashed immediately
+(`InvalidOperationException: The node must be of type 'JsonObject'`) since
+each outer element is itself a `JsonArray`, not a floor object. Fixed by
+flattening across acts before assigning floor numbers, so they run
+continuously across the whole run (matching vanilla Slay the Spire's own
+numbering) rather than restarting at 1 each act.
+Also verified via the same smoke test: the deck-size column's reconciliation
+trick (`startingDeckSize = finalDeckCount - totalGained + totalRemoved`,
+running total incremented per floor by `cardsGained - cardsRemoved`) lands
+exactly on each player's true final deck count on both a solo run and a
+multi-act run — confirms the approach doesn't need to know/guess how
+`floor_added_to_deck` tags the very first floor.
+
+Scope deliberately cut for v1: event/ancient-choice flavor text (the
+`{"key":..., "table":...}` LocKey objects in `event_choices`/
+`ancient_choice`) isn't resolved — those rows just show whatever
+relics/cards/potions/gold changed, not the narrative text, to avoid a
+second localization-resolution system on top of the model-id one. Multiple
+`rooms[]` entries per map point (never observed, but the schema allows it)
+only render the first.
+
 ### Not yet verified live (2026-08-31 batch, continued)
 
 None of the following have been tested in-game yet as of this note — all
@@ -637,6 +769,10 @@ run:
 - Per-fight card play breakdown, now as a wrapping HFlowContainer grid
   instead of a long list.
 - Poison-damage-dealt Applier fix.
-- Gold chart starting-balance baseline fix.
+- Gold chart StageIndex-bucketing fix (second attempt, after the Timestamp-
+  grouping approach didn't actually fix the reported desync).
 - Same-character NetId-based disambiguation ("Silent 1"/"Silent 2") across
   all charts, card-count panels, and the live Damage HUD table.
+- Turns chart collapsed to a single shared series instead of per-player.
+- Real enemy display names (via combatRoom.Encounter.Title) replacing internal encounter ids.
+- Browser-based run summary report (RunSummaryReport.cs) — JSON-parsing logic smoke-tested standalone (see above), but the ModelDb-based title resolution, the "Run Report" button, and the generated page's actual appearance in a browser have not been exercised live.

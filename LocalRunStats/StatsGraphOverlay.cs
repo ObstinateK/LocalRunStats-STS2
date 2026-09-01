@@ -27,6 +27,7 @@ public sealed partial class StatsGraphOverlay : Control
 
     private ColorRect _bg;
     private Button _closeButton;
+    private Button _runReportButton;
     private Button _damageGoldTabButton;
     private Button _turnsCardsTabButton;
     private Button _perStageButton;
@@ -72,6 +73,14 @@ public sealed partial class StatsGraphOverlay : Control
         _closeButton = new Button { Text = "X", Size = new Vector2(32f, 32f) };
         _closeButton.Pressed += () => Visible = false;
         AddChild(_closeButton);
+
+        // Local history/*.run files are only written once a run actually
+        // ends (win/death/abandon), so this always opens the run that just
+        // finished — no dedicated "run ended" hook needed. See
+        // RunSummaryReport.
+        _runReportButton = new Button { Text = "Run Report", Size = new Vector2(110f, 32f) };
+        _runReportButton.Pressed += RunSummaryReport.OpenLatest;
+        AddChild(_runReportButton);
 
         _damageGoldTabButton = new Button { Text = "Damage & Gold", Position = new Vector2(16f, 44f), Size = new Vector2(140f, 28f) };
         _turnsCardsTabButton = new Button { Text = "Turns & Cards", Position = new Vector2(164f, 44f), Size = new Vector2(140f, 28f) };
@@ -133,6 +142,7 @@ public sealed partial class StatsGraphOverlay : Control
 
         _bg.Size = Size;
         _closeButton.Position = new Vector2(w - 44f, 8f);
+        _runReportButton.Position = new Vector2(w - 44f - 8f - 110f, 8f);
 
         var chartTop = 158f; // room for tab row (44) + mode buttons (80) + act filter row (114)
         var chartWidth = w - 32f;

@@ -48,6 +48,11 @@ public sealed class CardPlayCountRecord
 public sealed class GoldRecord
 {
     public string Timestamp { get; set; } = "";
+    // Shared "how many fights have ended so far" counter (RunContext.CurrentStageIndex)
+    // — the chart's actual x-axis grouping key, since gold events fire at
+    // independent wall-clock moments per player and raw Timestamp grouping
+    // never aligns them. See RunContext.AdvanceStage.
+    public int StageIndex { get; set; }
     public int ActIndex { get; set; }
     public ulong PlayerNetId { get; set; }
     public string CharacterName { get; set; } = "";

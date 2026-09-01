@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
+using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Players;
@@ -33,6 +34,15 @@ public sealed class CombatStatsListener : SingletonModel
     private int _damageDealt;
     private int _damageTaken;
     private int _damageBlocked;
+
+    // Turn count is shared across the whole player side, not per-player —
+    // co-op players take their turns within the same round, so every
+    // player's individual turn-start-based count would always be identical
+    // (confirmed by the user: "it will be the same for each player in
+    // multiplayer"). Tracked via AfterSideTurnStart (fires once per side's
+    // turn, regardless of how many players are on that side) instead of the
+    // old per-player AfterPlayerTurnStart-based counting.
+    private int _currentFightTurns;
 
     // Keyed by Player.NetId — multiplayer-aware (co-op has multiple distinct
     // player Creatures, each dealing/taking damage independently). Read by
@@ -247,15 +257,26 @@ public sealed class CombatStatsListener : SingletonModel
     }
 
     // Signature confirmed via reflection: single unambiguous Player param, no
-    // dealer/target-style swap risk.
+    // dealer/target-style swap risk. Turn counting itself moved to
+    // AfterSideTurnStart below (see _currentFightTurns) — this hook still
+    // matters for the other two side effects.
     public override Task AfterPlayerTurnStart(PlayerChoiceContext context, Player player)
     {
         if (player != null)
         {
             GameContext.LocalPlayer = player;
             RunContext.EnsureBaselineGoldCaptured(player);
-            GetOrCreateTracker(player).CurrentFightTurns++;
         }
+        return Task.CompletedTask;
+    }
+
+    // Signature confirmed by decompiling Hook.AfterSideTurnStart: fires once
+    // per side per round (not once per player on that side), which is
+    // exactly the shared "how many turns has this fight had" counter we
+    // want — see _currentFightTurns.
+    public override Task AfterSideTurnStart(CombatSide side, IReadOnlyList<Creature> participants, ICombatState combatState)
+    {
+        if (side == CombatSide.Player) _currentFightTurns++;
         return Task.CompletedTask;
     }
 
@@ -317,9 +338,15 @@ public sealed class CombatStatsListener : SingletonModel
         }
         finally
         {
+            // Advances the shared stage counter gold events get stamped with
+            // (see RunContext) — after this fight's own gold changes (if any
+            // fired mid-combat) so they're still attributed to the stage that
+            // just ended, not the one about to start.
+            RunContext.AdvanceStage();
             _damageDealt = 0;
             _damageTaken = 0;
             _damageBlocked = 0;
+            _currentFightTurns = 0;
             // Any entries left here belong to deaths that were prevented
             // (Fairy in a Bottle, etc.) and never reached AfterDiedToDoom to
             // consume them — drop them rather than let them leak into the
@@ -352,7 +379,7 @@ public sealed class CombatStatsListener : SingletonModel
                 {
                     Timestamp = timestamp,
                     ActIndex = actIndex,
-                    EncounterId = combatRoom.ModelId.ToString(),
+                    EncounterId = GetEncounterDisplayName(combatRoom),
                     PlayerNetId = netId,
                     CharacterName = characterName,
                     CardName = cardName,
@@ -379,21 +406,30 @@ public sealed class CombatStatsListener : SingletonModel
                 tracker.TakenByActIndex[actIndex] = existingTaken + tracker.CurrentFightTaken;
                 tracker.CurrentFightTaken = 0;
             }
-            // Turns/cards-played have no ByAct tracking (not shown on the live
-            // HUD) — just reset for the next fight, after WritePerPlayerRecords
-            // already persisted this fight's values.
-            tracker.CurrentFightTurns = 0;
+            // Cards-played has no ByAct tracking (not shown on the live HUD)
+            // — just reset for the next fight, after WritePerPlayerRecords
+            // already persisted this fight's values. (_currentFightTurns is
+            // reset separately in AfterCombatEnd's finally block.)
             tracker.CurrentFightCardsPlayed = 0;
         }
         CombatDamageHud.RefreshAll();
     }
+
+    // combatRoom.ModelId.ToString() is the internal id (e.g.
+    // "ENCOUNTER.SHRINKER_BEETLE_WEAK") — combatRoom.Encounter.Title is the
+    // actual in-game display name ("Shrinker Beetle"), same LocString
+    // pattern already used for character names elsewhere in this mod
+    // (player.Character?.Title?.GetRawText()). Falls back to the raw id only
+    // if the encounter/title somehow isn't populated.
+    private static string GetEncounterDisplayName(CombatRoom combatRoom) =>
+        combatRoom.Encounter?.Title?.GetRawText() ?? combatRoom.ModelId.ToString();
 
     private static void WriteAggregateRecord(CombatRoom combatRoom)
     {
         var record = new CombatRecord
         {
             Timestamp = DateTime.UtcNow.ToString("o"),
-            EncounterId = combatRoom.ModelId.ToString(),
+            EncounterId = GetEncounterDisplayName(combatRoom),
             DamageDealt = Instance._damageDealt,
             DamageTaken = Instance._damageTaken,
             DamageBlocked = Instance._damageBlocked,
@@ -410,20 +446,26 @@ public sealed class CombatStatsListener : SingletonModel
     {
         var actIndex = combatRoom.Act?.Index ?? 0;
         var timestamp = DateTime.UtcNow.ToString("o");
+        // TurnsTaken is the same shared _currentFightTurns value on every
+        // player's row for this fight — kept as a per-row field (rather than
+        // moved to the once-per-fight CombatRecord) so the existing
+        // PlayerCombatRecord-based chart plumbing (act filter, fight
+        // grouping) keeps working; PlayerStatsLog.BuildTurnsChartData just
+        // reads one representative row per fight instead of one per player.
         foreach (var (netId, tracker) in Instance._damageByPlayer)
         {
             if (tracker.CurrentFightDealt == 0 && tracker.CurrentFightTaken == 0
-                && tracker.CurrentFightTurns == 0 && tracker.CurrentFightCardsPlayed == 0) continue;
+                && Instance._currentFightTurns == 0 && tracker.CurrentFightCardsPlayed == 0) continue;
             var record = new PlayerCombatRecord
             {
                 Timestamp = timestamp,
                 ActIndex = actIndex,
-                EncounterId = combatRoom.ModelId.ToString(),
+                EncounterId = GetEncounterDisplayName(combatRoom),
                 PlayerNetId = netId,
                 CharacterName = tracker.CharacterName,
                 DamageDealt = tracker.CurrentFightDealt,
                 DamageTaken = tracker.CurrentFightTaken,
-                TurnsTaken = tracker.CurrentFightTurns,
+                TurnsTaken = Instance._currentFightTurns,
                 CardsPlayed = tracker.CurrentFightCardsPlayed,
             };
             PlayerStatsLog.AppendJsonLine("player_combat_stats.jsonl", record);
