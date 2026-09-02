@@ -1075,6 +1075,69 @@ Position tuning sliders were re-added to `MapPathAdvisorPanel` on request
 locked in at (15, 435) and removed once more (was (29, 186) before this
 round, (16, 16) originally).
 
+### Fixed 2026-09-01: graph/card-count panel font, root-caused this time
+
+Revisited after being shelved ("revert all font changes and shelf it for
+now" — two earlier guesses, `ThemeDB.GetProjectTheme()?.DefaultFont` and
+`GetThemeFont("font", "Label")`, both silently changed nothing). Root
+cause, finally identified: `DrawString()` inside `_Draw()` has NO theme to
+inherit from — it's raw immediate-mode drawing, so whatever `Font` object
+gets passed to it is exactly what renders, full stop. A real `Label` node,
+by contrast, resolves its font through Godot's normal ancestor-theme
+cascade automatically the moment it's added to the live tree — already
+proven working elsewhere in this mod with zero special font code
+(`StatsGraphOverlay`'s title Label, `CombatDamageHud`'s labels). The two
+earlier attempts were both still trying to manually feed the "correct" Font
+object INTO a DrawString call — same broken approach, just a different
+guess at which Font object to feed it.
+Fix: `ChartCanvas` and `CardPlayCountsPanel` no longer draw any text via
+`DrawString` at all. `_Draw()` is now used only for the background rect and
+bars/lines (bar rects, line points) — none of which need a font. Every
+piece of text (title, legend, x-axis labels, hover tooltip) is a real
+`Label` child node instead, rebuilt in a new `Recompute()` method (called
+from `SetData()` and on `Resized`, since label positions and bar/line
+geometry both depend on this Control's `Size`, which changes whenever
+`StatsGraphOverlay` lays its charts out). The hover tooltip's box size is
+still measured via `GetStringSize` for accurate positioning/clamping, but
+now reads the size from `_tooltipLabel.GetThemeFont("font")` /
+`GetThemeFontSize("font_size")` — the SAME resolved font a real Label
+already uses, not a fresh guess.
+
+### Added 2026-09-01: graph overlay restyled to match the native tooltip box (untested)
+
+Requested with a screenshot of a native keyword tooltip ("Block") next to
+this mod's own Card Stats tooltip, asking for the graph overlay to look the
+same. Added `NativeTooltipStyle.CreateBackground()`, which loads and
+instantiates `res://scenes/ui/hover_tip.tscn` and detaches its `%Bg` node —
+both confirmed via decompile (NHoverTipSet.AssetPaths lists the scene path;
+NHoverTipSet itself reaches into an instantiated copy via
+`GetNode<CanvasItem>("%Bg")` to swap in a debuff material, confirming that
+unique name is real). `StatsGraphOverlay`'s full-panel background now uses
+this instead of a flat `ColorRect` color; chart/panel titles use a
+hand-matched gold (`NativeTooltipStyle.TitleGold`) instead of white.
+**Genuinely unverified, more so than usual**: unlike the font fix or the
+map highlight (both reused APIs whose exact behavior was confirmed by
+decompiling C# method bodies), `%Bg`'s actual node TYPE (Panel? NinePatchRect?
+TextureRect?) and whether it scales cleanly to a full-screen size instead of
+its native small-tooltip size couldn't be confirmed — `.tscn` scene files
+are packed inside `SlayTheSpire2.pck`, not readable on disk the way the C#
+assembly is, so this is a plausible extrapolation from confirmed related
+code, not a directly-verified fact. `CreateBackground()` catches any load
+failure and falls back to the old flat-color panel with a logged warning,
+so a wrong assumption here degrades rather than crashes — check the log for
+"Failed to load native tooltip background" on first test, and look
+carefully at whether the reused background actually looks right at full
+panel size (a NinePatchRect built for a small box might tile or stretch
+oddly when blown up this large).
+**Deliberately out of scope for this pass**: the individual chart boxes
+(ChartCanvas/CardPlayCountsPanel's own translucent backgrounds) were left
+unchanged — reusing this same background there would require either
+drawing a StyleBox mid-`_Draw()` (only possible if `%Bg` turns out to be
+StyleBox-backed, unconfirmed) or adding it as a child Control, which would
+render ON TOP of the hand-drawn bars/lines by default Godot child-ordering
+rather than behind them. Only the main overlay panel and header/title
+colors were changed.
+
 ### Not yet verified live (2026-08-31 batch, continued)
 
 None of the following have been tested in-game yet as of this note — all

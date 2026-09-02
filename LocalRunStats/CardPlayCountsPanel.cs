@@ -21,10 +21,20 @@ public sealed partial class CardPlayCountsPanel : Control
     private RichTextLabel _overallLabel;
     private Label _byFightHeader;
     private HFlowContainer _fightFlow;
+    private Label _titleLabel;
 
     public override void _Ready()
     {
         MouseFilter = MouseFilterEnum.Stop;
+
+        // A real Label instead of _Draw()+DrawString — see ChartCanvas for
+        // why (DrawString has no theme to inherit a font from; a Label
+        // added to this same live tree resolves the game's actual font for
+        // free, the same way every other Label in this mod already does).
+        _titleLabel = new Label { Text = Title, Position = new Vector2(4f, 0f), MouseFilter = MouseFilterEnum.Ignore };
+        _titleLabel.AddThemeFontSizeOverride("font_size", 14);
+        _titleLabel.AddThemeColorOverride("font_color", NativeTooltipStyle.TitleGold);
+        AddChild(_titleLabel);
 
         // HorizontalScrollMode.Disabled is what actually makes this wrap: it
         // clamps the child's width to the ScrollContainer's own viewport
@@ -58,7 +68,7 @@ public sealed partial class CardPlayCountsPanel : Control
         column.AddChild(_overallLabel);
 
         _byFightHeader = new Label { Text = "--- By Fight ---" };
-        _byFightHeader.AddThemeColorOverride("font_color", Colors.White);
+        _byFightHeader.AddThemeColorOverride("font_color", NativeTooltipStyle.TitleGold);
         column.AddChild(_byFightHeader);
 
         _fightFlow = new HFlowContainer { SizeFlagsHorizontal = SizeFlags.ExpandFill };
@@ -82,8 +92,6 @@ public sealed partial class CardPlayCountsPanel : Control
     public override void _Draw()
     {
         DrawRect(new Rect2(Vector2.Zero, Size), new Color(1f, 1f, 1f, 0.05f));
-        var font = ThemeDB.FallbackFont;
-        DrawString(font, new Vector2(4f, 14f), Title, HorizontalAlignment.Left, -1f, 14, Colors.White);
     }
 
     public void SetData(string overallBbcode, IReadOnlyList<string> fightBlocks)

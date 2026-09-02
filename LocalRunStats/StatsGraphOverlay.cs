@@ -25,7 +25,7 @@ public sealed partial class StatsGraphOverlay : Control
     private bool _perStage = true;
     private int? _actFilter; // null = all acts
 
-    private ColorRect _bg;
+    private Control _bg;
     private Button _closeButton;
     private Button _runReportButton;
     private Button _damageGoldTabButton;
@@ -62,11 +62,17 @@ public sealed partial class StatsGraphOverlay : Control
         Visible = false;
         ZIndex = 200;
 
-        _bg = new ColorRect { Color = new Color(0.05f, 0.05f, 0.08f, 0.97f), MouseFilter = MouseFilterEnum.Stop };
+        // Reuses the game's own native tooltip background instead of a
+        // flat color — see NativeTooltipStyle. Overrides its default
+        // MouseFilter.Ignore back to Stop: a small tooltip box never needs
+        // to block clicks, but this IS the overlay's own backstop that
+        // blocks clicks to whatever's behind it while open.
+        _bg = NativeTooltipStyle.CreateBackground();
+        _bg.MouseFilter = MouseFilterEnum.Stop;
         AddChild(_bg);
 
         var title = new Label { Text = "Run Stats", Position = new Vector2(16f, 8f) };
-        title.AddThemeColorOverride("font_color", Colors.White);
+        title.AddThemeColorOverride("font_color", NativeTooltipStyle.TitleGold);
         title.AddThemeFontSizeOverride("font_size", 20);
         AddChild(title);
 
@@ -140,8 +146,14 @@ public sealed partial class StatsGraphOverlay : Control
         Size = new Vector2(w, h);
 
         _bg.Size = Size;
-        _closeButton.Position = new Vector2(w - 44f, 8f);
-        _runReportButton.Position = new Vector2(w - 44f - 8f - 110f, 8f);
+        // Right-edge margin: 44f (original) -> 56f ("almost there") -> 68f
+        // ("little too much") -> 62f (midpoint). The native tooltip
+        // background (see NativeTooltipStyle) has a rounded top-right
+        // corner the old flat ColorRect never had, and the close button was
+        // sitting right on top of that curve — reported live as looking
+        // "offset"/poking outside the box.
+        _closeButton.Position = new Vector2(w - 62f, 8f);
+        _runReportButton.Position = new Vector2(w - 62f - 8f - 110f, 8f);
 
         var chartTop = 158f; // room for tab row (44) + mode buttons (80) + act filter row (114)
         var chartWidth = w - 32f;

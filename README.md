@@ -19,7 +19,8 @@ data anywhere.
     past runs (local history + cached community runs)
   - A thematic keyword tag (e.g. `[Vulnerable]`) when the card/relic shares a mechanic with your
     current deck
-- **Graph overlay** (via the 📈 button on the HUD) — full-screen charts for the current run:
+- **Graph overlay** (via the 📈 button on the HUD) — full-screen charts for the current run,
+  styled to match the game's own native tooltip look (same background, same gold section titles):
   - Damage Dealt / Damage Taken / Gold, per-stage (bar) or cumulative (line), filterable by act
   - Turns per fight and a per-fight card-play breakdown grid
 - **Card hover stats** — hovering any card shows **Times Played**, **Times Drawn**, and **Play
