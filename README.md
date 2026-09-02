@@ -33,7 +33,8 @@ data anywhere.
   recommended remaining route (using the game's own native hover highlight) for a goal you choose:
   most Elites, most Events, most Upgrade opportunities (rest sites), most Shops, or most Treasure.
   Ties on the chosen goal are broken by avoiding Elites, then avoiding regular fights — except when
-  the goal is Elites itself, where more combat is the point.
+  the goal is Elites itself, where more Elite fights is the point, but it still prefers fewer
+  regular fights along the way.
 
 ## Installing
 

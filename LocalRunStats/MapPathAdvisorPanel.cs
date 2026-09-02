@@ -9,11 +9,11 @@ namespace LocalRunStats;
 // highlighted "best remaining path" is optimized for.
 public sealed partial class MapPathAdvisorPanel : Control
 {
-    // Locked in 2026-09-01 via the tuning sliders that used to live here
-    // (removed once a working spot was found — same pattern as the Damage
-    // HUD's own tuning panel earlier in this mod). Originally (16, 16),
-    // which sat on top of the relic display.
-    private static readonly Vector2 Offset = new(29f, 186f);
+    // Locked in 2026-09-01 (second round of tuning — was (29, 186) before
+    // that, (16, 16) originally). Tuning sliders removed once again once a
+    // working spot was found — same pattern as the Damage HUD's own tuning
+    // panel earlier in this mod.
+    private static readonly Vector2 Offset = new(15f, 435f);
 
     private static readonly (MapPathAdvisor.Goal Goal, string Label)[] Goals =
     {

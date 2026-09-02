@@ -29,18 +29,21 @@ public static class MapPathAdvisor
         Treasures,
     }
 
-    // Combat is a tie-breaker, not the primary objective, for every goal
-    // except Elites (where maximizing elites necessarily means MORE combat
-    // by definition, so avoiding it there would fight the goal itself). Two
-    // scales, not one: PrimaryScale always dominates first (the goal count
-    // itself), then EliteAvoidScale — an Elite fight is worse to route
-    // through than a regular one when the goal is something else entirely
-    // (harder, more dangerous), so it needs to outweigh "one fewer regular
-    // fight" the same way the primary goal outweighs everything. Regular
-    // Monster rooms are the lowest-priority tie-break, worth exactly 1 each.
-    // A path's room-type counts can only ever differ by roughly the number
-    // of floors in an act (well under 1,000), so these factors leave a wide
-    // safety margin at every tier.
+    // Combat is a tie-breaker, not the primary objective, for every goal —
+    // maximizing the chosen goal always wins first regardless of fight
+    // count. Two scales, not one: PrimaryScale always dominates (the goal
+    // count itself), then EliteAvoidScale — an Elite fight is worse to
+    // route through than a regular one, so it needs to outweigh "one fewer
+    // regular fight" the same way the primary goal outweighs everything.
+    // Regular Monster rooms are the lowest-priority tie-break, worth
+    // exactly 1 each, and apply to EVERY goal including Elites itself —
+    // more elites is still the primary objective there, but among paths
+    // tied on elite count, fewer regular fights along the way wins. Only
+    // the Elite-avoidance tier is skipped for the Elites goal (avoiding
+    // elites there would fight the goal's own primary objective); regular-
+    // fight avoidance never is. A path's room-type counts can only ever
+    // differ by roughly the number of floors in an act (well under 1,000),
+    // so these factors leave a wide safety margin at every tier.
     private const int PrimaryScale = 1_000_000;
     private const int EliteAvoidScale = 1_000;
 
@@ -71,9 +74,15 @@ public static class MapPathAdvisor
         // elite and one is a regular combat" [expecting the elite to be
         // avoided, not treated as free]. Elite now costs strictly more than
         // a regular Monster room.
-        var avoidCombat = goal != Goal.Elites;
-        var elitePenalty = avoidCombat && point.PointType == MapPointType.Elite ? 1 : 0;
-        var monsterPenalty = avoidCombat && point.PointType == MapPointType.Monster ? 1 : 0;
+        //
+        // monsterPenalty is now UNCONDITIONAL — regular fights are never
+        // desired for ANY goal, Elites included: "even on the elite toggle
+        // path it will prioritize less enemies, but will still go for path
+        // of most elites." Elites themselves still only get penalized for
+        // every OTHER goal (avoiding them for the Elites goal would fight
+        // the goal's own primary objective).
+        var elitePenalty = goal != Goal.Elites && point.PointType == MapPointType.Elite ? 1 : 0;
+        var monsterPenalty = point.PointType == MapPointType.Monster ? 1 : 0;
         return primary * PrimaryScale - elitePenalty * EliteAvoidScale - monsterPenalty;
     }
 

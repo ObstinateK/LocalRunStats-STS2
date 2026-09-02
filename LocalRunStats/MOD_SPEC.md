@@ -1062,6 +1062,19 @@ primary goal count (dominant) -> avoid Elites (for every goal except
 Elites) -> avoid regular Monster fights (lowest priority). See
 `MapPathAdvisor.Weight`.
 
+### Changed 2026-09-01: Elites goal now also avoids regular fights, panel repositioned again
+
+Requested: "even on the elite toggle path it will prioritize less enemies,
+but will still go for path of most elites." `monsterPenalty` in
+`MapPathAdvisor.Weight` is now unconditional (applies to every goal
+including Elites) — only `elitePenalty` stays conditional on
+`goal != Goal.Elites`. Verified live, confirmed working.
+
+Position tuning sliders were re-added to `MapPathAdvisorPanel` on request
+("give me control on moving it"), used to move the panel again, then
+locked in at (15, 435) and removed once more (was (29, 186) before this
+round, (16, 16) originally).
+
 ### Not yet verified live (2026-08-31 batch, continued)
 
 None of the following have been tested in-game yet as of this note — all
